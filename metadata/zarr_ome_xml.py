@@ -10,10 +10,10 @@ from ome_types.model import OME, Image, Pixels, Plate, Well, WellSample, ImageRe
 from ome_types.model.simple_types import ImageID, PixelsID, PixelType, PlateID, WellID, WellSampleID
 
 
-pixels_id_counter = 1
-image_id_counter = 1
-well_id_counter = 1
-well_sample_id_counter = 1
+pixels_id_counter = 0
+image_id_counter = 0
+well_id_counter = 0
+well_sample_id_counter = 0
 
 
 def write_xml(ome, name):
@@ -78,7 +78,6 @@ def handle_plate(store, zarr_uri):
             for dim, size in zip(axes, shape):
                 sizes[dim["name"]] = size
             pixels_type = array_data.dtype.name
-
             img = create_image(well_sample_path, pixels_type, sizes)
             ome.images.append(img)
             well_sample.image_ref = ImageRef(id=img.id)
