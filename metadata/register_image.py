@@ -79,8 +79,10 @@ def parse_metadata(uri, endpoint):
         return sizes, pixels_type, object_name
 
 
-def register_image(uri, endpoint, host="localhost", username="root", password=""):
+def register_image(uri, endpoint, name="", host="localhost", username="root", password=""):
     sizes, pixels_type, object_name = parse_metadata(uri, endpoint)
+    if name:
+        object_name = name
     # connect to omero
     try:
         conn = BlitzGateway(username, password, host=host, secure=True)
@@ -110,6 +112,7 @@ def register_image(uri, endpoint, host="localhost", username="root", password=""
         raise e
     finally:
         conn.close()
+    
 
 
 
@@ -132,15 +135,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--uri", required=True, type=str, help="The URI to the S3 store")
     parser.add_argument("--endpoint", required=False, type=str, help="Enter the URL endpoint if applicable")
-    host = input("Host [localhost]: ") or 'localhost'  # noqa
-    username = input("Username [root]: ") or 'root'
-    password = getpass("Password: ")
+    parser.add_argument("--name", required=False, type=str, help="The name of the image")
+    #host = input("Host [localhost]: ") or 'localhost'  # noqa
+    #username = input("Username [root]: ") or 'root'
+    #password = getpass("Password: ")
     args = parser.parse_args()
     uri = args.uri
     endpoint = args.endpoint
     validate_uri(uri)
     validate_endpoint(endpoint)
-    register_image(uri, endpoint, host=host, username=username, password=password)
+    register_image(uri, endpoint, args.name)
+    #register_image(uri, endpoint, args.name, host=host, username=username, password=password)
 
 if __name__ == "__main__":
     main()
