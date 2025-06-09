@@ -22,6 +22,31 @@ def write_xml(ome, name):
         f.write(xml_text)
 
 
+def get_pix_type(dtype):
+    if dtype == "uint8":
+        return PixelType.UINT8
+    elif dtype == "uint16":
+        return PixelType.UINT16
+    elif dtype == "uint32":
+        return PixelType.UINT32
+    elif dtype == "uint64":
+        raise Exception("uint64 not supported") 
+    elif dtype == "int8":
+        return PixelType.INT8
+    elif dtype == "int16":
+        return PixelType.INT16
+    elif dtype == "int32":
+        return PixelType.INT32
+    elif dtype == "int64":
+        raise Exception("int64 not supported") 
+    elif dtype == "float32":
+        return PixelType.FLOAT
+    elif dtype == "float64":
+        return PixelType.DOUBLE
+    else:
+        raise ValueError("Unsupported pixel type: %s" % dtype)
+
+
 def create_image(image_name, pixels_type, sizes):
     global pixels_id_counter
     global image_id_counter
@@ -30,7 +55,7 @@ def create_image(image_name, pixels_type, sizes):
     image_id = image_id_counter
     image_id_counter += 1
 
-    ptype = PixelType(pixels_type)
+    ptype = get_pix_type(pixels_type)
     pixels = Pixels(
         id=PixelsID("Pixels:%s" % pixels_id),
         dimension_order="XYZCT",
