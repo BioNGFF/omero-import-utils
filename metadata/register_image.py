@@ -33,6 +33,8 @@ from numpy import dtype
 from getpass import getpass
 
 from omero.gateway import BlitzGateway
+from omero.gateway import OMERO_NUMPY_TYPES
+
 from omero.model.enums import PixelsTypeint8, PixelsTypeuint8, PixelsTypeint16
 from omero.model.enums import PixelsTypeuint16, PixelsTypeint32
 from omero.model.enums import PixelsTypeuint32, PixelsTypefloat
@@ -40,6 +42,7 @@ from omero.model.enums import PixelsTypecomplex, PixelsTypedouble
 
 from omero.model import ExternalInfoI
 from omero.rtypes import rstring, rlong
+
 
 ENDPOINT = "s3.amazonaws.com"
 
@@ -67,13 +70,21 @@ def get_s3_uri(uri, endpoint):
     return "{0.scheme}".format(parsed_uri) + "://" + endpoint + "/" + url + "{0.path}".format(parsed_uri)
 
     
-def parse_metadata(uri, endpoint):
-        config = botocore.client.Config(signature_version=botocore.UNSIGNED)
+def parse_metadata(uri, endpoint, nosignrequest=False):
+        config = None
+        if nosignrequest:
+            config = botocore.client.Config(signature_version=botocore.UNSIGNED)
         session = boto3.Session()
         if endpoint:
-            client = session.client('s3', endpoint_url=endpoint, config=config)
+            if config:
+                client = session.client('s3', endpoint_url=endpoint, config=config)
+            else:
+                client = session.client('s3', endpoint_url=endpoint)
         else:
-            client = session.client('s3', config=config)
+            if config:
+                client = session.client('s3', config=config)
+            else:
+                client = session.client('s3')
         transport_params = {'client': client}
         path = uri + ".zattrs"
         with open(path, 'rb', transport_params=transport_params) as f:
@@ -100,8 +111,8 @@ def parse_metadata(uri, endpoint):
         return sizes, pixels_type, object_name
 
 
-def register_image(uri, endpoint, name="", host="localhost", username="root", password=""):
-    sizes, pixels_type, object_name = parse_metadata(uri, endpoint)
+def register_image(uri, endpoint, nosignrequest=False, name="", host="localhost", username="root", password=""):
+    sizes, pixels_type, object_name = parse_metadata(uri, endpoint, nosignrequest)
     if name:
         object_name = name
     # connect to omero
@@ -157,6 +168,7 @@ def main():
     parser.add_argument("--uri", required=True, type=str, help="The URI to the S3 store")
     parser.add_argument("--endpoint", required=False, type=str, help="Enter the URL endpoint if applicable")
     parser.add_argument("--name", required=False, type=str, help="The name of the image")
+    parser.add_argument("--nosignrequest", required=False, action='store_true', help="Indicate to sign anonymously")
     host = input("Host [localhost]: ") or 'localhost'  # noqa
     username = input("Username [root]: ") or 'root'
     password = getpass("Password: ")
@@ -165,7 +177,7 @@ def main():
     endpoint = args.endpoint
     validate_uri(uri)
     validate_endpoint(endpoint)
-    register_image(uri, endpoint, args.name, host=host, username=username, password=password)
+    register_image(uri, endpoint, args.nosignrequest, args.name, host=host, username=username, password=password)
 
 if __name__ == "__main__":
     main()
