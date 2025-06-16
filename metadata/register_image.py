@@ -165,7 +165,7 @@ def validate_endpoint(endpoint):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--uri", required=True, type=str, help="The URI to the S3 store")
+    parser.add_argument("uri", type=str, help="The URI to the S3 store")
     parser.add_argument("--endpoint", required=False, type=str, help="Enter the URL endpoint if applicable")
     parser.add_argument("--name", required=False, type=str, help="The name of the image")
     parser.add_argument("--nosignrequest", required=False, action='store_true', help="Indicate to sign anonymously")
