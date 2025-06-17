@@ -88,6 +88,8 @@ def create_client(endpoint, nosignrequest=False):
     session = boto3.Session()
     if endpoint:
         if config:
+            print(endpoint)
+            print(nosignrequest)
             client = session.client('s3', endpoint_url=endpoint, config=config)
         else:
             client = session.client('s3', endpoint_url=endpoint)
@@ -103,9 +105,17 @@ def determine_object_to_register(uri, transport_params):
     """
     Determine the object to register: supported Plate and Image
     """
-    path = uri + ".zattrs"
-    with open(path, 'rb', transport_params=transport_params) as f:
-        zattrs = json.load(f)
+    extension = ".zattrs"
+    path = uri + extension
+    try:
+        with open(path, 'rb', transport_params=transport_params) as f:
+            zattrs = json.load(f)
+    except Exception as e:
+        extension = "zarr.json"
+        path = uri + extension
+        with open(path, 'rb', transport_params=transport_params) as f:
+            zattrs = json.load(f)
+
     if "plate" in zattrs:
         return OBJECT_PLATE, uri
     if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
@@ -252,9 +262,16 @@ def register_image(uri, transport_params,  host, username, password, name="", en
     """
     Register the ome.zarr image in OMERO.
     """
-    path = uri + ".zattrs"
-    with open(path, 'rb', transport_params=transport_params) as f:
-        zattrs = json.load(f)
+    extension = ".zattrs"
+    path = uri + extension
+    try:
+        with open(path, 'rb', transport_params=transport_params) as f:
+            zattrs = json.load(f)
+    except Exception as e:
+        extension = "zarr.json"
+        path = uri + extension
+        with open(path, 'rb', transport_params=transport_params) as f:
+            zattrs = json.load(f)
 
     sizes, pixels_type, object_name = parse_image_metadata(uri, zattrs, transport_params)
     if name:
@@ -322,9 +339,17 @@ def register_plate(uri, transport_params, host, username, password, name="", end
     '''
     Register a plate
     '''
-    path = uri + ".zattrs"
-    with open(path, 'rb', transport_params=transport_params) as f:
-        zattrs = json.load(f)
+    extension = ".zattrs"
+    path = uri + extension
+    try:
+        with open(path, 'rb', transport_params=transport_params) as f:
+            zattrs = json.load(f)
+    except Exception as e:
+        extension = "zarr.json"
+        path = uri + extension
+        with open(path, 'rb', transport_params=transport_params) as f:
+            zattrs = json.load(f)
+    
 
     plate_attrs = zattrs["plate"]
     if name:
@@ -380,7 +405,7 @@ def register_plate(uri, transport_params, host, username, password, name="", end
             well.column = rint(column_index)
             well.row = rint(row_index)
 
-            well_full_path = f"{uri}{well_path}/.zattrs"
+            well_full_path = f"{uri}{well_path}/{extension}"
             with open(well_full_path, 'rb', transport_params=transport_params) as wfp:
                 well_samples_json = json.load(wfp)
             for index, sample_attrs in enumerate(well_samples_json["well"]["images"]):
