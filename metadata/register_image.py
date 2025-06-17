@@ -118,6 +118,7 @@ def register_image(uri, endpoint, nosignrequest=False, name="", host="localhost"
     # connect to omero
     try:
         conn = BlitzGateway(username, password, host=host, secure=True)
+        conn.connect()
         conn.c.enableKeepAlive(60)
         session = conn.c.getSession()
         pixels_service = session.getPixelsService()
