@@ -46,6 +46,8 @@ from omero.model import ExternalInfoI
 from omero.rtypes import rbool, rdouble, rint, rlong, rstring
 
 
+EXTENSION_JSON = "zarr.json"
+
 ENDPOINT = "s3.amazonaws.com"
 
 OBJECT_PLATE = "plate"
@@ -111,42 +113,48 @@ def determine_object_to_register(uri, transport_params):
         with open(path, 'rb', transport_params=transport_params) as f:
             zattrs = json.load(f)
     except Exception as e:
-        extension = "zarr.json"
+        extension = EXTENSION_JSON
         path = uri + extension
         with open(path, 'rb', transport_params=transport_params) as f:
             zattrs = json.load(f)
 
-    if "plate" in zattrs:
-        return OBJECT_PLATE, uri
+    if extension == EXTENSION_JSON:
+        if "plate" in zattrs['attributes']['ome']:
+            return OBJECT_PLATE, uri
+    else:
+        if "plate" in zattrs:
+            return OBJECT_PLATE, uri
     if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
         uri = f"{uri}0/"
     return OBJECT_IMAGE, uri
 
 
-def parse_image_metadata(uri, zattrs, transport_params):
+def parse_image_metadata(uri, image_zattrs, transport_params, extension):
     """
     Parse the image metadata
-    missing channels and rendering def
     """
-    array_path = zattrs["multiscales"][0]["datasets"][0]["path"]
+    array_path = image_zattrs["datasets"][0]["path"]
     # load .zarray from path to know the dimension
-    path = uri + array_path + "/.zarray"
+    if extension == EXTENSION_JSON:
+        data_type_key = "data_type"
+        path = uri + array_path + "/zarr.json"
+    else:
+        data_type_key = "dtype"
+        path = uri + array_path + "/.zarray"
 
     with open(path, 'rb', transport_params=transport_params) as f:
         array_data = json.load(f)
-
-    object_name = uri.rstrip("/").split("/")[-1]
-
     sizes = {}
     shape = array_data["shape"]
-    axes = zattrs["multiscales"][0].get("axes")
+    axes = image_zattrs.get("axes")
     # Need to check the older version
-    if axes is not None:
+    if axes:
         for dim, size in zip(axes, shape):
             sizes[dim["name"]] = size
 
-    pixels_type = dtype(array_data["dtype"]).name
-    return sizes, pixels_type, object_name
+    pixels_type = dtype(array_data[data_type_key]).name
+    return sizes, pixels_type
+
 
 def create_image(pixels_service, query_service, sizes, pixels_type, object_name, options):
     '''
@@ -263,19 +271,25 @@ def register_image(uri, transport_params,  host, username, password, name="", en
     Register the ome.zarr image in OMERO.
     """
     extension = ".zattrs"
-    path = uri + extension
     try:
+        path = uri + extension
         with open(path, 'rb', transport_params=transport_params) as f:
             zattrs = json.load(f)
+        image_zattrs = zattrs['multiscales'][0]
+        omero_zattrs = zattrs.get('omero', None)
     except Exception as e:
         extension = "zarr.json"
         path = uri + extension
         with open(path, 'rb', transport_params=transport_params) as f:
             zattrs = json.load(f)
+        omero_zattrs = zattrs["attributes"]["ome"].get('omero', None)
+        image_zattrs = zattrs["attributes"]["ome"]['multiscales'][0]
 
-    sizes, pixels_type, object_name = parse_image_metadata(uri, zattrs, transport_params)
+    sizes, pixels_type = parse_image_metadata(uri, image_zattrs, transport_params, extension)
     if name:
         object_name = name
+    else:
+        object_name = uri.rstrip("/").split("/")[-1]
     # connect to omero
     try:
         conn = BlitzGateway(username, password, host=host, secure=True)
@@ -298,7 +312,7 @@ def register_image(uri, transport_params,  host, username, password, name="", en
         params = omero.sys.ParametersI()
         families = query_service.findAllByQuery('select f from Family as f', params, ctx)
         models = query_service.findAllByQuery('select f from RenderingModel as f', params, ctx)
-        rnd_def = set_rendering_settings(zattrs.get('omero', None), pixels_type, image.getPixelsId(), families, models)
+        rnd_def = set_rendering_settings(omero_zattrs, pixels_type, image.getPixelsId(), families, models)
         # Save the rendering def
         update_service.saveAndReturnObject(rnd_def)
 
@@ -351,7 +365,11 @@ def register_plate(uri, transport_params, host, username, password, name="", end
             zattrs = json.load(f)
     
 
-    plate_attrs = zattrs["plate"]
+    if extension == EXTENSION_JSON:
+        plate_attrs = zattrs["attributes"]["ome"]["plate"]
+    else:
+        plate_attrs = zattrs["plate"]
+
     if name:
         object_name = name
     else:
@@ -371,8 +389,8 @@ def register_plate(uri, transport_params, host, username, password, name="", end
         # loads the families and the color model
         ctx = {'omero.group': '-1'}
         params = omero.sys.ParametersI()
-        families = query_service.findAllByQuery('select f from Family as f', params, ctx)
-        models = query_service.findAllByQuery('select f from RenderingModel as f', params, ctx)
+        #families = query_service.findAllByQuery('select f from Family as f', params, ctx)
+        #models = query_service.findAllByQuery('select f from RenderingModel as f', params, ctx)
        
         # Create a plate
         plate = omero.model.PlateI()
@@ -390,7 +408,7 @@ def register_plate(uri, transport_params, host, username, password, name="", end
                 plate_acquisitions[pa.get("id")] = plate_acquisition
                 plate.addPlateAcquisition(omero.model.PlateAcquisitionI(plate_acquisition.getId(), False))
 
-        plate = update_service.saveAndReturnObject(plate)
+        #plate = update_service.saveAndReturnObject(plate)
         wells = []
         rnd_defs = []
         images_to_save = []
@@ -408,22 +426,35 @@ def register_plate(uri, transport_params, host, username, password, name="", end
             well_full_path = f"{uri}{well_path}/{extension}"
             with open(well_full_path, 'rb', transport_params=transport_params) as wfp:
                 well_samples_json = json.load(wfp)
-            for index, sample_attrs in enumerate(well_samples_json["well"]["images"]):
+            if extension == EXTENSION_JSON:
+                well_samples_attrs = well_samples_json["attributes"]["ome"]["well"]["images"]
+            else:
+                well_samples_attrs = well_samples_json["well"]["images"]
+
+            for index, sample_attrs in enumerate(well_samples_attrs):
                 image_uri = f"{uri}{well_path}/{sample_attrs['path']}/"
 
-                with open(image_uri + ".zattrs", 'rb', transport_params=transport_params) as ifp:
+                with open(image_uri + EXTENSION_JSON, 'rb', transport_params=transport_params) as ifp:
                     image_json = json.load(ifp)
 
-                sizes, pixels_type, object_name = parse_image_metadata(image_uri, image_json, transport_params)
-                iid = create_image(pixels_service, query_service, sizes, pixels_type, object_name, conn.SERVICE_OPTS)
+                if extension == EXTENSION_JSON:
+                    image_attrs = image_json["attributes"]["ome"]['multiscales'][0]
+                    omero_attrs = image_json["attributes"]["ome"].get("omero", None)
+                else:
+                    image_attrs = image_json['multiscales'][0]
+                    omero_attrs = image_json.get("omero", None)
 
-                image_path = f"{image_uri}{image_json['multiscales'][0]['datasets'][0]['path']}/"
+                sizes, pixels_type = parse_image_metadata(image_uri, image_attrs, transport_params, extension)
+                image_path = f"{image_uri}{image_attrs['datasets'][0]['path']}/"
+                iid = create_image(pixels_service, query_service, sizes, pixels_type, image_attrs['name'], conn.SERVICE_OPTS)
+
+                
                 # load the image object
                 image = conn.getObject("Image", iid)
                 set_external_info(image_path, endpoint, image)
                 images_to_save.append(image)
                 # Check  rendering settings
-                rnd_def = set_rendering_settings(zattrs.get('omero', None), pixels_type, image.getPixelsId(), families, models)
+                rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
                 rnd_defs.append(rnd_def)
                 # Link well sample and plate acquisition
                 ws = omero.model.WellSampleI()
