@@ -117,13 +117,16 @@ def determine_object_to_register(uri, transport_params):
             zattrs = json.load(f)
 
     if extension == EXTENSION_JSON:
-        if "plate" in zattrs['attributes']['ome']:
+        file_zattrs = zattrs['attributes']['ome']
+        if "plate" in file_zattrs:
             return OBJECT_PLATE, uri
+        if "bioformats2raw.layout" in file_zattrs and file_zattrs["bioformats2raw.layout"] == 3:
+           uri = f"{uri}0/"
     else:
         if "plate" in zattrs:
             return OBJECT_PLATE, uri
-    if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
-        uri = f"{uri}0/"
+        if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
+            uri = f"{uri}0/"
     return OBJECT_IMAGE, uri
 
 
