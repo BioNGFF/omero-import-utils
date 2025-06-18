@@ -90,8 +90,6 @@ def create_client(endpoint, nosignrequest=False):
     session = boto3.Session()
     if endpoint:
         if config:
-            print(endpoint)
-            print(nosignrequest)
             client = session.client('s3', endpoint_url=endpoint, config=config)
         else:
             client = session.client('s3', endpoint_url=endpoint)
@@ -389,8 +387,8 @@ def register_plate(uri, transport_params, host, username, password, name="", end
         # loads the families and the color model
         ctx = {'omero.group': '-1'}
         params = omero.sys.ParametersI()
-        #families = query_service.findAllByQuery('select f from Family as f', params, ctx)
-        #models = query_service.findAllByQuery('select f from RenderingModel as f', params, ctx)
+        families = query_service.findAllByQuery('select f from Family as f', params, ctx)
+        models = query_service.findAllByQuery('select f from RenderingModel as f', params, ctx)
        
         # Create a plate
         plate = omero.model.PlateI()
@@ -408,7 +406,7 @@ def register_plate(uri, transport_params, host, username, password, name="", end
                 plate_acquisitions[pa.get("id")] = plate_acquisition
                 plate.addPlateAcquisition(omero.model.PlateAcquisitionI(plate_acquisition.getId(), False))
 
-        #plate = update_service.saveAndReturnObject(plate)
+        plate = update_service.saveAndReturnObject(plate)
         wells = []
         rnd_defs = []
         images_to_save = []
