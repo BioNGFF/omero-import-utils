@@ -157,7 +157,7 @@ def parse_image_metadata(uri, image_zattrs, transport_params, extension):
     return sizes, pixels_type
 
 
-def create_image(pixels_service, query_service, sizes, pixels_type, object_name, options):
+def create_image(pixels_service, query_service, sizes, pixels_type, channels, object_name, options):
     '''
     Create an Image/Pixels object
     '''
@@ -165,7 +165,9 @@ def create_image(pixels_service, query_service, sizes, pixels_type, object_name,
     size_z = sizes.get("z", 1)
     size_x = sizes.get("x", 1)
     size_y = sizes.get("y", 1)
-    channels = list(range(sizes.get("c", 1)))
+    size_c = sizes.get("c", 1)
+    if channels is None or len(channes) != size_c:
+        channels = list(range(sizes.get("c", 1)))
     omero_pixels_type = query_service.findByQuery("from PixelsType as p where p.value='%s'" % PIXELS_TYPE[pixels_type], None)
     return pixels_service.createImage(size_x, size_y, size_z, size_t, channels, omero_pixels_type,  object_name, "", options)
 
@@ -181,13 +183,24 @@ def hex_to_rgba(hex_color):
     return [r, g, b]
 
 
+def get_channels(omero_info):
+    '''
+    Find the name of the channels if specified
+    '''
+    channel_names = []
+    if omero_info is None:
+        return channel_names
+    for index, entry in enumerate(omero_info.get('channels', [])):
+        channel_names.append(entry.get('label', index))
+    return channel_names
+    
+
 def set_rendering_settings(omero_info, pixels_type, pixels_id, families, models):
     '''
     Extract the rendering settings and the channels information
     '''
     if omero_info is None:
         return
-    channel_names = {}
     rdefs = omero_info.get('rdefs', None)
     rnd_def = None
     if rdefs is not None:
@@ -218,7 +231,6 @@ def set_rendering_settings(omero_info, pixels_type, pixels_id, families, models)
     pixels_min = iinfo(pixels_type).min
     pixels_max = iinfo(pixels_type).max
     for index, entry in enumerate(omero_info.get('channels', [])):
-        channel_names[index] = entry.get('label', index)
         if rnd_def is not None:
             cb = omero.model.ChannelBindingI()
             rnd_def.addChannelBinding(cb)
@@ -287,6 +299,7 @@ def register_image(uri, transport_params,  host, username, password, name="", en
         image_zattrs = zattrs["attributes"]["ome"]['multiscales'][0]
 
     sizes, pixels_type = parse_image_metadata(uri, image_zattrs, transport_params, extension)
+    channel_names = get_channels(omero_zattrs)
     if name:
         object_name = name
     else:
@@ -300,7 +313,7 @@ def register_image(uri, transport_params,  host, username, password, name="", en
         pixels_service = session.getPixelsService()
         query_service = session.getQueryService()
         update_service = session.getUpdateService()
-        iid = create_image(pixels_service, query_service, sizes, pixels_type, object_name, conn.SERVICE_OPTS)
+        iid = create_image(pixels_service, query_service, sizes, pixels_type, object_name, channel_names, conn.SERVICE_OPTS)
         # load the image object
         image = conn.getObject("Image", iid)
         # register external info
@@ -447,9 +460,9 @@ def register_plate(uri, transport_params, host, username, password, name="", end
 
                 sizes, pixels_type = parse_image_metadata(image_uri, image_attrs, transport_params, extension)
                 image_path = f"{image_uri}{image_attrs['datasets'][0]['path']}/"
-                iid = create_image(pixels_service, query_service, sizes, pixels_type, image_attrs['name'], conn.SERVICE_OPTS)
+                channel_names = get_channels(omero_attrs)
+                iid = create_image(pixels_service, query_service, sizes, pixels_type, image_attrs['name'], channel_names, conn.SERVICE_OPTS)
 
-                
                 # load the image object
                 image = conn.getObject("Image", iid)
                 set_external_info(image_path, endpoint, image)
@@ -457,6 +470,7 @@ def register_plate(uri, transport_params, host, username, password, name="", end
                 # Check  rendering settings
                 rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
                 rnd_defs.append(rnd_def)
+                # Save channel name
                 # Link well sample and plate acquisition
                 ws = omero.model.WellSampleI()
                 acquisition_id = sample_attrs['acquisition']
