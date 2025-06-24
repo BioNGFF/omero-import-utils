@@ -517,11 +517,11 @@ def main():
         if not uri.endswith("/"):
             uri += "/"
         endpoint = args.endpoint
-        # uri = validate_uri(uri)
         validate_endpoint(endpoint)
         if uri.startswith("/"):
             transport_params = None
         else:
+            uri = validate_uri(uri)
             transport_params = create_client(endpoint, args.nosignrequest)
         type_to_register, uri = determine_object_to_register(uri, transport_params)
         print("type_to_register, uri", type_to_register, uri)
