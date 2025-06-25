@@ -331,7 +331,7 @@ def register_image(conn, uri, name=None, transport_params=None, endpoint=None, u
     families = load_families(query_service)
     models = load_models(query_service)
 
-    img_attrs = load_attrs(uri)
+    img_attrs = load_attrs(uri, transport_params)
     if name:
         image_name = name
     elif "name" in img_attrs:
