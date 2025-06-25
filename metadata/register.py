@@ -134,7 +134,7 @@ def load_attrs(uri, transport_params=None, extension=None):
             if "attributes" in zattrs:
                 zattrs = zattrs["attributes"]["ome"]
             return zattrs
-        except FileNotFoundError as e:
+        except Exception as e:
             pass
 
     raise FileNotFoundError(f"Could not load attributes from {uri}. Tried extensions: {extensions}")
@@ -180,7 +180,7 @@ def parse_image_metadata(uri, img_attrs, transport_params=None):
     return sizes, pixels_type
 
 
-def create_image(conn, image_attrs, image_uri, object_name, families, models, transport_params=None, endpoint=None):
+def create_image(conn, image_attrs, image_uri, object_name, families, models, transport_params=None, endpoint=None, uri_parameters=None):
     '''
     Create an Image/Pixels object
     '''
@@ -203,7 +203,7 @@ def create_image(conn, image_attrs, image_uri, object_name, families, models, tr
     
     image = conn.getObject("Image", iid)
     img_obj = image._obj
-    set_external_info(image_uri, img_obj, endpoint=endpoint)
+    set_external_info(image_uri, img_obj, endpoint=endpoint, uri_parameters=uri_parameters)
     # Check rendering settings
     rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
     
@@ -321,7 +321,7 @@ def load_models(query_service):
     return query_service.findAllByQuery('select f from RenderingModel as f', None, ctx)
  
 
-def register_image(conn, uri, name=None, transport_params=None, endpoint=None):
+def register_image(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
     """
     Register the ome.zarr image in OMERO.
     """
@@ -338,7 +338,7 @@ def register_image(conn, uri, name=None, transport_params=None, endpoint=None):
         image_name = img_attrs["name"]
     else:
         image_name = uri.rstrip("/").split("/")[-1]
-    image, rnd_def = create_image(conn, img_attrs, uri, image_name, families, models, transport_params, endpoint)
+    image, rnd_def = create_image(conn, img_attrs, uri, image_name, families, models, transport_params, endpoint, uri_parameters)
     update_service.saveAndReturnObject(image)
     update_service.saveAndReturnObject(rnd_def)
 
@@ -373,7 +373,7 @@ def create_plate_acquisition(pa):
     return plate_acquisition
     
 
-def register_plate(conn, uri, name=None, transport_params=None, endpoint=None):
+def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
     '''
     Register a plate
     '''
@@ -439,7 +439,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None):
             img_attrs = load_attrs(image_uri, transport_params)
             image_name = img_attrs.get('name', f"{well_path}/{sample_attrs['path']}")
 
-            image, rnd_def = create_image(conn, img_attrs, image_uri, image_name, families, models, transport_params, endpoint)
+            image, rnd_def = create_image(conn, img_attrs, image_uri, image_name, families, models, transport_params, endpoint, uri_parameters)
 
             images_to_save.append(image)
             rnd_defs.append(rnd_def)
@@ -462,7 +462,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None):
     print("Plate created with id:", plate.id.val)
 
 
-def set_external_info(uri, image, endpoint=None):
+def set_external_info(uri, image, endpoint=None, uri_parameters=None):
     '''
     Create the external info and link it to the image
     '''
@@ -474,6 +474,8 @@ def set_external_info(uri, image, endpoint=None):
         uri = format_s3_uri(uri, endpoint)
     elif uri.endswith("/"):
         uri = uri[:-1]
+    if uri_parameters:
+        uri = uri + uri_parameters
     setattr(extinfo, "lsid", rstring(uri))
     image.details.externalInfo = extinfo
 
@@ -502,6 +504,13 @@ def validate_endpoint(endpoint):
     if "https" not in scheme:
         raise Exception("Protocol should be https. Protocol specified is: " + scheme)
 
+def get_uri_parameters(transport_params, nosignrequest):
+    if transport_params is None:
+        return None
+    if nosignrequest:
+        return "?anonymous=true"
+    return None
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("uri", type=str, help="The URI to the S3 store")
@@ -517,18 +526,21 @@ def main():
         if not uri.endswith("/"):
             uri += "/"
         endpoint = args.endpoint
+        nosignrequest = args.nosignrequest
         validate_endpoint(endpoint)
         if uri.startswith("/"):
             transport_params = None
         else:
             uri = validate_uri(uri)
-            transport_params = create_client(endpoint, args.nosignrequest)
+            transport_params = create_client(endpoint, nosignrequest)
+        params = get_uri_parameters(transport_params, nosignrequest)
         type_to_register, uri = determine_object_to_register(uri, transport_params)
         print("type_to_register, uri", type_to_register, uri)
+
         if type_to_register == OBJECT_PLATE:
-            register_plate(conn, uri, args.name, transport_params, endpoint=endpoint)
+            register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
         else:
-            register_image(conn, uri, args.name, transport_params, endpoint=endpoint)
+            register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
 
 if __name__ == "__main__":
     main()
