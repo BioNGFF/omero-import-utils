@@ -20,7 +20,8 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 from urllib.parse import urlsplit
-import os
+import numpy as np
+import dask.array as da
 
 import argparse
 import json
@@ -34,17 +35,18 @@ from numpy import dtype, iinfo
 # from getpass import getpass
 
 from omero.cli import cli_login
-from omero.gateway import BlitzGateway
+from omero.gateway import BlitzGateway, ColorHolder
 from omero.gateway import OMERO_NUMPY_TYPES
 
 import omero
+import omero_rois
 
 from omero.model.enums import PixelsTypeint8, PixelsTypeuint8, PixelsTypeint16
 from omero.model.enums import PixelsTypeuint16, PixelsTypeint32
 from omero.model.enums import PixelsTypeuint32, PixelsTypefloat
 from omero.model.enums import PixelsTypecomplex, PixelsTypedouble
 
-from omero.model import ExternalInfoI
+from omero.model import ExternalInfoI, RoiI, MaskI
 from omero.rtypes import rbool, rdouble, rint, rlong, rstring
 
 
@@ -111,6 +113,110 @@ def create_client(endpoint, nosignrequest=False):
             client = session.client('s3')
     transport_params = {'client': client}
     return transport_params
+
+
+def masks_from_labels_nd(
+        labels_nd, axes="tcz", rgba=None, text=None):
+    rois = {}
+
+    # For each label value, we create an ROI that
+    # contains 2D masks for each time point, channel, and z-slice.
+    for i in range(1, labels_nd.max() + 1):
+        print("Mask value", i)
+        if not np.any(labels_nd == i):
+            continue
+
+        masks = []
+        bin_img = labels_nd == i
+
+        sizes = {dim: labels_nd.shape[axes.index(dim)] for dim in axes}
+        size_t = sizes.get("t", 1)
+        size_c = sizes.get("c", 1)
+        size_z = sizes.get("z", 1)
+
+        for t in range(size_t):
+            for c in range(size_c):
+                for z in range(size_z):
+                    print("t, c, z", t, c, z)
+
+                    indices = []
+                    if "t" in axes:
+                        indices.append(t)
+                    if "c" in axes:
+                        indices.append(c)
+                    if "z" in axes:
+                        indices.append(z)
+
+                    # indices.append(np.s_[::])
+                    # indices.append(np.s_[x:x_max:])
+
+                    # slice down to 2D plane
+                    plane = bin_img[tuple(indices)]
+
+                    if not np.any(plane):
+                        continue
+
+                    plane = plane.compute()
+
+                    # Find bounding box to minimise size of mask
+                    xmask = plane.sum(0).nonzero()[0]
+                    ymask = plane.sum(1).nonzero()[0]
+                    print("xmask", xmask, "ymask", ymask)
+                    # if any(xmask) and any(ymask):
+                    x0 = min(xmask)
+                    w = max(xmask) - x0 + 1
+                    y0 = min(ymask)
+                    h = max(ymask) - y0 + 1
+                    print("cropping to x, y, w, h", x0, y0, w, h)
+                    submask = plane[y0:(y0 + h), x0:(x0 + w)]
+
+                    mask = MaskI()
+                    mask.setBytes(np.packbits(np.asarray(submask, dtype=int)))
+                    mask.setWidth(rdouble(w))
+                    mask.setHeight(rdouble(h))
+                    mask.setX(rdouble(x0))
+                    mask.setY(rdouble(y0))
+
+                    if rgba is not None:
+                        ch = ColorHolder.fromRGBA(*rgba)
+                        mask.setFillColor(rint(ch.getInt()))
+                    if "z" in axes:
+                        mask.setTheZ(rint(z))
+                    if "c" in axes:
+                        mask.setTheC(rint(c))
+                    if "t" in axes:
+                        mask.setTheT(rint(t))
+                    if text is not None:
+                        mask.setTextValue(rstring(text))
+
+                    masks.append(mask)
+
+        rois[i] = masks
+
+    return rois
+
+
+def rois_from_labels_nd(conn, img, labels_nd, axes="tcz"):
+    rois = masks_from_labels_nd(labels_nd, axes=axes, rgba=None)
+
+    for label, masks in rois.items():
+        if len(masks) > 0:
+            roi_name = "fixme"
+            create_roi(conn, img=img, shapes=masks, name=roi_name)
+
+
+def create_roi(conn, img, shapes, name):
+    # create an ROI, link it to Image
+    roi = RoiI()
+    # use the omero.model.ImageI that underlies the 'image' wrapper
+    roi.setImage(img._obj)
+    roi.setName(rstring(name))
+    for shape in shapes:
+        # shape.setTextValue(rstring(name))
+        roi.addShape(shape)
+    # Save the ROI (saves any linked shapes too)
+    print(f"Save ROI for image {img.getName()}")
+    return conn.getUpdateService().saveAndReturnObject(roi)
 
 
 def load_attrs(uri, transport_params=None, extension=None):
@@ -180,6 +286,26 @@ def parse_image_metadata(uri, img_attrs, transport_params=None):
     return sizes, pixels_type
 
 
+def create_labels(conn, image, labels_uri, transport_params=None):
+
+    """
+    Create labels for the image
+    """
+    labels_attrs = load_attrs(labels_uri, transport_params=transport_params)
+    
+    axes = labels_attrs["multiscales"][0]["axes"]
+    axes_names = [axis["name"] for axis in axes]
+
+    ds_path = labels_attrs["multiscales"][0]["datasets"][0]["path"]
+    array_path = f"{labels_uri}{ds_path}/"
+    labels_nd = da.from_zarr(array_path)
+    print("labels_nd", labels_nd)
+    print("axes_names", axes_names)
+
+    # Create ROIs from the labels
+    rois_from_labels_nd(conn, image, labels_nd, axes_names)
+
+
 def create_image(conn, image_attrs, image_uri, object_name, families, models, transport_params=None, endpoint=None, uri_parameters=None):
     '''
     Create an Image/Pixels object
@@ -207,6 +333,18 @@ def create_image(conn, image_attrs, image_uri, object_name, families, models, tr
     # Check rendering settings
     rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
     
+    # check for labels...
+    labels_url = image_uri + "labels/"
+    print("checking for labels at", labels_url)
+    try:
+        labels_attrs = load_attrs(labels_url, transport_params=transport_params)
+        print("labels_attrs", labels_attrs)
+        if "labels" in labels_attrs:
+            for labels_path in labels_attrs["labels"]:
+                create_labels(conn, image, f"{labels_url}{labels_path}/", transport_params=transport_params)
+    except FileNotFoundError:
+        pass
+
     return img_obj, rnd_def
 
 def hex_to_rgba(hex_color):
