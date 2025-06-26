@@ -50,7 +50,7 @@ from omero.rtypes import rbool, rdouble, rint, rlong, rstring
 
 EXTENSION_JSON = "zarr.json"
 
-ENDPOINT = "s3.amazonaws.com"
+AWS_DEFAULT_ENDPOINT = "s3.us-east-1.amazonaws.com"
 
 OBJECT_PLATE = "plate"
 OBJECT_IMAGE = "image"
@@ -78,7 +78,7 @@ def format_s3_uri(uri, endpoint):
         parsed_endpoint = urlsplit(endpoint)
         endpoint = "{0.netloc}".format(parsed_endpoint)
     else:
-        endpoint = ENDPOINT
+        endpoint = AWS_DEFAULT_ENDPOINT
     return "{0.scheme}".format(parsed_uri) + "://" + endpoint + "/" + url + "{0.path}".format(parsed_uri)
 
 
@@ -470,12 +470,14 @@ def set_external_info(uri, image, endpoint=None, uri_parameters=None):
     # non-nullable properties
     setattr(extinfo, "entityId", rlong(3))
     setattr(extinfo, "entityType", rstring("com.glencoesoftware.ngff:multiscales"))
-    if endpoint is not None:
+    if not uri.startswith("/"):
         uri = format_s3_uri(uri, endpoint)
-    elif uri.endswith("/"):
-        uri = uri[:-1]
     if uri_parameters:
+        if not uri.endswith("/"):
+            uri = uri + "/"
         uri = uri + uri_parameters
+    if uri.endswith("/"): # check with Will
+        uri = uri[:-1]
     setattr(extinfo, "lsid", rstring(uri))
     image.details.externalInfo = extinfo
 
@@ -523,8 +525,6 @@ def main():
 
         args = parser.parse_args()
         uri = args.uri
-        if not uri.endswith("/"):
-            uri += "/"
         endpoint = args.endpoint
         nosignrequest = args.nosignrequest
         validate_endpoint(endpoint)
