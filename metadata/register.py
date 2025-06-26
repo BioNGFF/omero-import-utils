@@ -116,8 +116,24 @@ def create_client(endpoint, nosignrequest=False):
 
 
 def masks_from_labels_nd(
-        labels_nd, axes="tcz", rgba=None, text=None):
+        labels_nd, axes="tcz", label_props=None):
     rois = {}
+
+    colors_by_value = {}
+    if "colors" in label_props:
+        for color in label_props["colors"]:
+            pixel_value = color.get("label-value", None)
+            rgba = color.get("rgba", None)
+            if pixel_value and rgba and len(rgba) == 4:
+                colors_by_value[pixel_value] = rgba
+
+    text_by_value = {}
+    if "properties" in label_props:
+        for props in label_props["properties"]:
+            pixel_value = props.get("label-value", None)
+            text = props.get("omero:text", None)
+            if pixel_value and text:
+                text_by_value[pixel_value] = text
 
     # For each label value, we create an ROI that
     # contains 2D masks for each time point, channel, and z-slice.
@@ -177,8 +193,8 @@ def masks_from_labels_nd(
                     mask.setX(rdouble(x0))
                     mask.setY(rdouble(y0))
 
-                    if rgba is not None:
-                        ch = ColorHolder.fromRGBA(*rgba)
+                    if i in colors_by_value:
+                        ch = ColorHolder.fromRGBA(*colors_by_value[i])
                         mask.setFillColor(rint(ch.getInt()))
                     if "z" in axes:
                         mask.setTheZ(rint(z))
@@ -186,8 +202,8 @@ def masks_from_labels_nd(
                         mask.setTheC(rint(c))
                     if "t" in axes:
                         mask.setTheT(rint(t))
-                    if text is not None:
-                        mask.setTextValue(rstring(text))
+                    if i in text_by_value:
+                        mask.setTextValue(rstring(text_by_value[i]))
 
                     masks.append(mask)
 
@@ -196,23 +212,22 @@ def masks_from_labels_nd(
     return rois
 
 
-def rois_from_labels_nd(conn, img, labels_nd, axes="tcz"):
-    rois = masks_from_labels_nd(labels_nd, axes=axes, rgba=None)
+def rois_from_labels_nd(conn, img, labels_nd, axes="tcz", label_props=None):
+    # Text is set on Mask shapes, not ROIs
+    rois = masks_from_labels_nd(labels_nd, axes, label_props)
 
     for label, masks in rois.items():
         if len(masks) > 0:
-            roi_name = "fixme"
-            create_roi(conn, img=img, shapes=masks, name=roi_name)
+            create_roi(conn, img=img, shapes=masks)
 
 
-def create_roi(conn, img, shapes, name):
+def create_roi(conn, img, shapes, name=None):
     # create an ROI, link it to Image
     roi = RoiI()
-    # use the omero.model.ImageI that underlies the 'image' wrapper
     roi.setImage(img._obj)
-    roi.setName(rstring(name))
+    if name is not None:
+        roi.setName(rstring(name))
     for shape in shapes:
-        # shape.setTextValue(rstring(name))
         roi.addShape(shape)
     # Save the ROI (saves any linked shapes too)
     print(f"Save ROI for image {img.getName()}")
@@ -291,19 +306,20 @@ def create_labels(conn, image, labels_uri, transport_params=None):
     """
     Create labels for the image
     """
-    labels_attrs = load_attrs(labels_uri, transport_params=transport_params)
+    label_image = load_attrs(labels_uri, transport_params=transport_params)
     
-    axes = labels_attrs["multiscales"][0]["axes"]
+    axes = label_image["multiscales"][0]["axes"]
     axes_names = [axis["name"] for axis in axes]
+    label_props = label_image.get("image-label", None)
 
-    ds_path = labels_attrs["multiscales"][0]["datasets"][0]["path"]
+    ds_path = label_image["multiscales"][0]["datasets"][0]["path"]
     array_path = f"{labels_uri}{ds_path}/"
     labels_nd = da.from_zarr(array_path)
     print("labels_nd", labels_nd)
     print("axes_names", axes_names)
 
     # Create ROIs from the labels
-    rois_from_labels_nd(conn, image, labels_nd, axes_names)
+    rois_from_labels_nd(conn, image, labels_nd, axes_names, label_props)
 
 
 def create_image(conn, image_attrs, image_uri, object_name, families, models, transport_params=None, endpoint=None, uri_parameters=None):
