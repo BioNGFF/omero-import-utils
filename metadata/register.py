@@ -322,7 +322,7 @@ def create_labels(conn, image, labels_uri, transport_params=None):
     rois_from_labels_nd(conn, image, labels_nd, axes_names, label_props)
 
 
-def create_image(conn, image_attrs, image_uri, object_name, families, models, transport_params=None, endpoint=None, uri_parameters=None):
+def create_image(conn, image_attrs, image_uri, object_name, families, models, transport_params=None, endpoint=None, uri_parameters=None, do_labels=False):
     '''
     Create an Image/Pixels object
     '''
@@ -350,16 +350,17 @@ def create_image(conn, image_attrs, image_uri, object_name, families, models, tr
     rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
     
     # check for labels...
-    labels_url = image_uri + "labels/"
-    print("checking for labels at", labels_url)
-    try:
-        labels_attrs = load_attrs(labels_url, transport_params=transport_params)
-        print("labels_attrs", labels_attrs)
-        if "labels" in labels_attrs:
-            for labels_path in labels_attrs["labels"]:
-                create_labels(conn, image, f"{labels_url}{labels_path}/", transport_params=transport_params)
-    except FileNotFoundError:
-        pass
+    if do_labels:
+        labels_url = image_uri + "labels/"
+        print("checking for labels at", labels_url)
+        try:
+            labels_attrs = load_attrs(labels_url, transport_params=transport_params)
+            print("labels_attrs", labels_attrs)
+            if "labels" in labels_attrs:
+                for labels_path in labels_attrs["labels"]:
+                    create_labels(conn, image, f"{labels_url}{labels_path}/", transport_params=transport_params)
+        except FileNotFoundError:
+            pass
 
     return img_obj, rnd_def
 
@@ -475,7 +476,7 @@ def load_models(query_service):
     return query_service.findAllByQuery('select f from RenderingModel as f', None, ctx)
  
 
-def register_image(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
+def register_image(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None, do_labels=False):
     """
     Register the ome.zarr image in OMERO.
     """
@@ -492,7 +493,7 @@ def register_image(conn, uri, name=None, transport_params=None, endpoint=None, u
         image_name = img_attrs["name"]
     else:
         image_name = uri.rstrip("/").split("/")[-1]
-    image, rnd_def = create_image(conn, img_attrs, uri, image_name, families, models, transport_params, endpoint, uri_parameters)
+    image, rnd_def = create_image(conn, img_attrs, uri, image_name, families, models, transport_params, endpoint, uri_parameters, do_labels)
     update_service.saveAndReturnObject(image)
     update_service.saveAndReturnObject(rnd_def)
 
@@ -527,7 +528,7 @@ def create_plate_acquisition(pa):
     return plate_acquisition
     
 
-def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
+def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None, do_labels=False):
     '''
     Register a plate
     '''
@@ -593,7 +594,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
             img_attrs = load_attrs(image_uri, transport_params)
             image_name = img_attrs.get('name', f"{well_path}/{sample_attrs['path']}")
 
-            image, rnd_def = create_image(conn, img_attrs, image_uri, image_name, families, models, transport_params, endpoint, uri_parameters)
+            image, rnd_def = create_image(conn, img_attrs, image_uri, image_name, families, models, transport_params, endpoint, uri_parameters, do_labels)
 
             images_to_save.append(image)
             rnd_defs.append(rnd_def)
@@ -673,6 +674,7 @@ def main():
     parser.add_argument("--endpoint", required=False, type=str, help="Enter the URL endpoint if applicable")
     parser.add_argument("--name", required=False, type=str, help="The name of the plate")
     parser.add_argument("--nosignrequest", required=False, action='store_true', help="Indicate to sign anonymously")
+    parser.add_argument("--labels", required=False, action='store_true', help="Also import any OME-Zarr labels found")
         
     with cli_login() as cli:
         conn = BlitzGateway(client_obj=cli._client)
@@ -683,6 +685,8 @@ def main():
         nosignrequest = args.nosignrequest
         validate_endpoint(endpoint)
         if uri.startswith("/"):
+            if not uri.endswith("/"):
+                uri = uri + "/"
             transport_params = None
         else:
             uri = validate_uri(uri)
@@ -692,9 +696,9 @@ def main():
         print("type_to_register, uri", type_to_register, uri)
 
         if type_to_register == OBJECT_PLATE:
-            register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params, do_labels=args.labels)
         else:
-            register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params, do_labels=args.labels)
 
 if __name__ == "__main__":
     main()
