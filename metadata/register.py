@@ -333,7 +333,6 @@ def create_image(conn, image_attrs, image_uri, object_name, families, models, tr
     size_z = sizes.get("z", 1)
     size_x = sizes.get("x", 1)
     size_y = sizes.get("y", 1)
-    size_c = sizes.get("c", 1)
     # if channels is None or len(channels) != size_c:
     channels = list(range(sizes.get("c", 1)))
     omero_pixels_type = query_service.findByQuery("from PixelsType as p where p.value='%s'" % PIXELS_TYPE[pixels_type], None)
@@ -390,6 +389,8 @@ def get_channels(omero_info):
 
 def set_channel_names(conn, iid, omero_attrs):
     channel_names = get_channels(omero_attrs)
+    if len(channel_names) == 0:
+        return
     nameDict = dict((i + 1, name) for i, name in enumerate(channel_names))
     conn.setChannelNames("Image", [iid], nameDict)
     
@@ -495,7 +496,8 @@ def register_image(conn, uri, name=None, transport_params=None, endpoint=None, u
         image_name = uri.rstrip("/").split("/")[-1]
     image, rnd_def = create_image(conn, img_attrs, uri, image_name, families, models, transport_params, endpoint, uri_parameters, do_labels)
     update_service.saveAndReturnObject(image)
-    update_service.saveAndReturnObject(rnd_def)
+    if rnd_def is not None:
+        update_service.saveAndReturnObject(rnd_def)
 
     print("Created Image", image.id.val)
 
@@ -597,7 +599,8 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
             image, rnd_def = create_image(conn, img_attrs, image_uri, image_name, families, models, transport_params, endpoint, uri_parameters, do_labels)
 
             images_to_save.append(image)
-            rnd_defs.append(rnd_def)
+            if rnd_def is not None:
+                rnd_defs.append(rnd_def)
             # Link well sample and plate acquisition
             ws = omero.model.WellSampleI()
             if 'acquisition' in sample_attrs:
@@ -612,7 +615,8 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
         # Save each Well and Images as we go...
         update_service.saveObject(well)
         update_service.saveAndReturnArray(images_to_save)
-        update_service.saveAndReturnIds(rnd_defs)
+        if len(rnd_defs) > 0:
+            update_service.saveAndReturnIds(rnd_defs)
 
     print("Plate created with id:", plate.id.val)
 
