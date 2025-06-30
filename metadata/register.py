@@ -20,7 +20,8 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 from urllib.parse import urlsplit
-import os
+import numpy as np
+import dask.array as da
 
 import argparse
 import json
@@ -34,17 +35,18 @@ from numpy import dtype, iinfo
 # from getpass import getpass
 
 from omero.cli import cli_login
-from omero.gateway import BlitzGateway
+from omero.gateway import BlitzGateway, ColorHolder
 from omero.gateway import OMERO_NUMPY_TYPES
 
 import omero
+import omero_rois
 
 from omero.model.enums import PixelsTypeint8, PixelsTypeuint8, PixelsTypeint16
 from omero.model.enums import PixelsTypeuint16, PixelsTypeint32
 from omero.model.enums import PixelsTypeuint32, PixelsTypefloat
 from omero.model.enums import PixelsTypecomplex, PixelsTypedouble
 
-from omero.model import ExternalInfoI
+from omero.model import ExternalInfoI, RoiI, MaskI
 from omero.rtypes import rbool, rdouble, rint, rlong, rstring
 
 
@@ -111,6 +113,125 @@ def create_client(endpoint, nosignrequest=False):
             client = session.client('s3')
     transport_params = {'client': client}
     return transport_params
+
+
+def masks_from_labels_nd(
+        labels_nd, axes="tcz", label_props=None):
+    rois = {}
+
+    colors_by_value = {}
+    if "colors" in label_props:
+        for color in label_props["colors"]:
+            pixel_value = color.get("label-value", None)
+            rgba = color.get("rgba", None)
+            if pixel_value and rgba and len(rgba) == 4:
+                colors_by_value[pixel_value] = rgba
+
+    text_by_value = {}
+    if "properties" in label_props:
+        for props in label_props["properties"]:
+            pixel_value = props.get("label-value", None)
+            text = props.get("omero:text", None)
+            if pixel_value and text:
+                text_by_value[pixel_value] = text
+
+    # For each label value, we create an ROI that
+    # contains 2D masks for each time point, channel, and z-slice.
+    for i in range(1, labels_nd.max() + 1):
+        print("Mask value", i)
+        if not np.any(labels_nd == i):
+            continue
+
+        masks = []
+        bin_img = labels_nd == i
+
+        sizes = {dim: labels_nd.shape[axes.index(dim)] for dim in axes}
+        size_t = sizes.get("t", 1)
+        size_c = sizes.get("c", 1)
+        size_z = sizes.get("z", 1)
+
+        for t in range(size_t):
+            for c in range(size_c):
+                for z in range(size_z):
+                    print("t, c, z", t, c, z)
+
+                    indices = []
+                    if "t" in axes:
+                        indices.append(t)
+                    if "c" in axes:
+                        indices.append(c)
+                    if "z" in axes:
+                        indices.append(z)
+
+                    # indices.append(np.s_[::])
+                    # indices.append(np.s_[x:x_max:])
+
+                    # slice down to 2D plane
+                    plane = bin_img[tuple(indices)]
+
+                    if not np.any(plane):
+                        continue
+
+                    plane = plane.compute()
+
+                    # Find bounding box to minimise size of mask
+                    xmask = plane.sum(0).nonzero()[0]
+                    ymask = plane.sum(1).nonzero()[0]
+                    print("xmask", xmask, "ymask", ymask)
+                    # if any(xmask) and any(ymask):
+                    x0 = min(xmask)
+                    w = max(xmask) - x0 + 1
+                    y0 = min(ymask)
+                    h = max(ymask) - y0 + 1
+                    print("cropping to x, y, w, h", x0, y0, w, h)
+                    submask = plane[y0:(y0 + h), x0:(x0 + w)]
+
+                    mask = MaskI()
+                    mask.setBytes(np.packbits(np.asarray(submask, dtype=int)))
+                    mask.setWidth(rdouble(w))
+                    mask.setHeight(rdouble(h))
+                    mask.setX(rdouble(x0))
+                    mask.setY(rdouble(y0))
+
+                    if i in colors_by_value:
+                        ch = ColorHolder.fromRGBA(*colors_by_value[i])
+                        mask.setFillColor(rint(ch.getInt()))
+                    if "z" in axes:
+                        mask.setTheZ(rint(z))
+                    if "c" in axes:
+                        mask.setTheC(rint(c))
+                    if "t" in axes:
+                        mask.setTheT(rint(t))
+                    if i in text_by_value:
+                        mask.setTextValue(rstring(text_by_value[i]))
+
+                    masks.append(mask)
+
+        rois[i] = masks
+
+    return rois
+
+
+def rois_from_labels_nd(conn, img, labels_nd, axes="tcz", label_props=None):
+    # Text is set on Mask shapes, not ROIs
+    rois = masks_from_labels_nd(labels_nd, axes, label_props)
+
+    for label, masks in rois.items():
+        if len(masks) > 0:
+            create_roi(conn, img=img, shapes=masks)
+
+
+def create_roi(conn, img, shapes, name=None):
+    # create an ROI, link it to Image
+    roi = RoiI()
+    roi.setImage(img._obj)
+    if name is not None:
+        roi.setName(rstring(name))
+    for shape in shapes:
+        roi.addShape(shape)
+    # Save the ROI (saves any linked shapes too)
+    print(f"Save ROI for image {img.getName()}")
+    return conn.getUpdateService().saveAndReturnObject(roi)
 
 
 def load_attrs(uri, transport_params=None, extension=None):
@@ -180,7 +301,28 @@ def parse_image_metadata(uri, img_attrs, transport_params=None):
     return sizes, pixels_type
 
 
-def create_image(conn, image_attrs, image_uri, object_name, families, models, transport_params=None, endpoint=None, uri_parameters=None):
+def create_labels(conn, image, labels_uri, transport_params=None):
+
+    """
+    Create labels for the image
+    """
+    label_image = load_attrs(labels_uri, transport_params=transport_params)
+    
+    axes = label_image["multiscales"][0]["axes"]
+    axes_names = [axis["name"] for axis in axes]
+    label_props = label_image.get("image-label", None)
+
+    ds_path = label_image["multiscales"][0]["datasets"][0]["path"]
+    array_path = f"{labels_uri}{ds_path}/"
+    labels_nd = da.from_zarr(array_path)
+    print("labels_nd", labels_nd)
+    print("axes_names", axes_names)
+
+    # Create ROIs from the labels
+    rois_from_labels_nd(conn, image, labels_nd, axes_names, label_props)
+
+
+def create_image(conn, image_attrs, image_uri, object_name, families, models, transport_params=None, endpoint=None, uri_parameters=None, do_labels=False):
     '''
     Create an Image/Pixels object
     '''
@@ -191,7 +333,6 @@ def create_image(conn, image_attrs, image_uri, object_name, families, models, tr
     size_z = sizes.get("z", 1)
     size_x = sizes.get("x", 1)
     size_y = sizes.get("y", 1)
-    size_c = sizes.get("c", 1)
     # if channels is None or len(channels) != size_c:
     channels = list(range(sizes.get("c", 1)))
     omero_pixels_type = query_service.findByQuery("from PixelsType as p where p.value='%s'" % PIXELS_TYPE[pixels_type], None)
@@ -207,6 +348,19 @@ def create_image(conn, image_attrs, image_uri, object_name, families, models, tr
     # Check rendering settings
     rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
     
+    # check for labels...
+    if do_labels:
+        labels_url = image_uri + "labels/"
+        print("checking for labels at", labels_url)
+        try:
+            labels_attrs = load_attrs(labels_url, transport_params=transport_params)
+            print("labels_attrs", labels_attrs)
+            if "labels" in labels_attrs:
+                for labels_path in labels_attrs["labels"]:
+                    create_labels(conn, image, f"{labels_url}{labels_path}/", transport_params=transport_params)
+        except FileNotFoundError:
+            pass
+
     return img_obj, rnd_def
 
 def hex_to_rgba(hex_color):
@@ -235,6 +389,8 @@ def get_channels(omero_info):
 
 def set_channel_names(conn, iid, omero_attrs):
     channel_names = get_channels(omero_attrs)
+    if len(channel_names) == 0:
+        return
     nameDict = dict((i + 1, name) for i, name in enumerate(channel_names))
     conn.setChannelNames("Image", [iid], nameDict)
     
@@ -321,7 +477,7 @@ def load_models(query_service):
     return query_service.findAllByQuery('select f from RenderingModel as f', None, ctx)
  
 
-def register_image(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
+def register_image(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None, do_labels=False):
     """
     Register the ome.zarr image in OMERO.
     """
@@ -338,9 +494,10 @@ def register_image(conn, uri, name=None, transport_params=None, endpoint=None, u
         image_name = img_attrs["name"]
     else:
         image_name = uri.rstrip("/").split("/")[-1]
-    image, rnd_def = create_image(conn, img_attrs, uri, image_name, families, models, transport_params, endpoint, uri_parameters)
+    image, rnd_def = create_image(conn, img_attrs, uri, image_name, families, models, transport_params, endpoint, uri_parameters, do_labels)
     update_service.saveAndReturnObject(image)
-    update_service.saveAndReturnObject(rnd_def)
+    if rnd_def is not None:
+        update_service.saveAndReturnObject(rnd_def)
 
     print("Created Image", image.id.val)
 
@@ -373,7 +530,7 @@ def create_plate_acquisition(pa):
     return plate_acquisition
     
 
-def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
+def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None, do_labels=False):
     '''
     Register a plate
     '''
@@ -439,10 +596,11 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
             img_attrs = load_attrs(image_uri, transport_params)
             image_name = img_attrs.get('name', f"{well_path}/{sample_attrs['path']}")
 
-            image, rnd_def = create_image(conn, img_attrs, image_uri, image_name, families, models, transport_params, endpoint, uri_parameters)
+            image, rnd_def = create_image(conn, img_attrs, image_uri, image_name, families, models, transport_params, endpoint, uri_parameters, do_labels)
 
             images_to_save.append(image)
-            rnd_defs.append(rnd_def)
+            if rnd_def is not None:
+                rnd_defs.append(rnd_def)
             # Link well sample and plate acquisition
             ws = omero.model.WellSampleI()
             if 'acquisition' in sample_attrs:
@@ -457,7 +615,8 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
         # Save each Well and Images as we go...
         update_service.saveObject(well)
         update_service.saveAndReturnArray(images_to_save)
-        update_service.saveAndReturnIds(rnd_defs)
+        if len(rnd_defs) > 0:
+            update_service.saveAndReturnIds(rnd_defs)
 
     print("Plate created with id:", plate.id.val)
 
@@ -520,6 +679,7 @@ def main():
     parser.add_argument("--endpoint", required=False, type=str, help="Enter the URL endpoint if applicable")
     parser.add_argument("--name", required=False, type=str, help="The name of the plate")
     parser.add_argument("--nosignrequest", required=False, action='store_true', help="Indicate to sign anonymously")
+    parser.add_argument("--labels", required=False, action='store_true', help="Also import any OME-Zarr labels found")
         
     with cli_login() as cli:
         conn = BlitzGateway(client_obj=cli._client)
@@ -530,6 +690,8 @@ def main():
         nosignrequest = args.nosignrequest
         validate_endpoint(endpoint)
         if uri.startswith("/"):
+            if not uri.endswith("/"):
+                uri = uri + "/"
             transport_params = None
         else:
             parsed_uri = urlsplit(uri)
@@ -549,9 +711,9 @@ def main():
         print("type_to_register, uri", type_to_register, uri)
 
         if type_to_register == OBJECT_PLATE:
-            register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params, do_labels=args.labels)
         else:
-            register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params, do_labels=args.labels)
 
 if __name__ == "__main__":
     main()
