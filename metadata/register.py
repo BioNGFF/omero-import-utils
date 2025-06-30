@@ -513,6 +513,7 @@ def get_uri_parameters(transport_params, nosignrequest):
         return "?anonymous=true"
     return None
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("uri", type=str, help="The URI to the S3 store")
@@ -531,6 +532,16 @@ def main():
         if uri.startswith("/"):
             transport_params = None
         else:
+            parsed_uri = urlsplit(uri)
+            scheme = "{0.scheme}".format(parsed_uri)
+            if "http" in scheme:
+                endpoint = "https://" + "{0.netloc}".format(parsed_uri)
+                nosignrequest = True
+                path = "{0.path}".format(parsed_uri)
+                if path.startswith("/"):
+                    path = path[1:]
+                uri = "s3://" + path
+
             uri = validate_uri(uri)
             transport_params = create_client(endpoint, nosignrequest)
         params = get_uri_parameters(transport_params, nosignrequest)
