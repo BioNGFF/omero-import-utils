@@ -29,7 +29,7 @@ try:
 except ImportError:
     sm_open = None
 
-from numpy import dtype, iinfo
+from numpy import dtype, iinfo, finfo
 
 # from getpass import getpass
 
@@ -200,13 +200,13 @@ def create_image(conn, image_attrs, image_uri, object_name, families, models, tr
 
     omero_attrs = image_attrs.get('omero', None)
     set_channel_names(conn, iid, omero_attrs)
-    
+
     image = conn.getObject("Image", iid)
     img_obj = image._obj
     set_external_info(image_uri, img_obj, endpoint=endpoint, uri_parameters=uri_parameters)
     # Check rendering settings
     rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
-    
+
     return img_obj, rnd_def
 
 def hex_to_rgba(hex_color):
@@ -237,7 +237,7 @@ def set_channel_names(conn, iid, omero_attrs):
     channel_names = get_channels(omero_attrs)
     nameDict = dict((i + 1, name) for i, name in enumerate(channel_names))
     conn.setChannelNames("Image", [iid], nameDict)
-    
+
 
 def set_rendering_settings(omero_info, pixels_type, pixels_id, families, models):
     '''
@@ -246,70 +246,73 @@ def set_rendering_settings(omero_info, pixels_type, pixels_id, families, models)
     if omero_info is None:
         return
     rdefs = omero_info.get('rdefs', None)
-    rnd_def = None
-    if rdefs is not None:
-        rnd_def = omero.model.RenderingDefI()
-        rnd_def.defaultZ = rint(rdefs.get('defaultZ', 0))
-        rnd_def.defaultT = rint(rdefs.get('defaultT', 0))
-        value = rdefs.get('model', 'rgb')
-        if value == 'color':
-            value = 'rgb'
-        ref_model = None
-        for m in models:
-            mv = m.getValue()._val
-            if mv == 'rgb':
-                ref_model = m
-            if mv == value:
-                rnd_def.model = m
-        if rnd_def.model is None:
-            rnd_def.model = ref_model
+    if rdefs is None:
+        rdefs = dict()
+    rnd_def = omero.model.RenderingDefI()
+    rnd_def.defaultZ = rint(rdefs.get('defaultZ', 0))
+    rnd_def.defaultT = rint(rdefs.get('defaultT', 0))
+    value = rdefs.get('model', 'rgb')
+    if value == 'color':
+        value = 'rgb'
+    ref_model = None
+    for m in models:
+        mv = m.getValue()._val
+        if mv == 'rgb':
+            ref_model = m
+        if mv == value:
+            rnd_def.model = m
+    if rnd_def.model is None:
+        rnd_def.model = ref_model
 
-        q_def = omero.model.QuantumDefI()
-        q_def.cdStart = rint(0)
-        q_def.cdEnd = rint(255)
-        # Flag to select a 8-bit depth (<i>=2^8-1</i>) output interval
-        q_def.bitResolution = rint(255)
-        rnd_def.quantization = q_def
-        rnd_def.pixels = omero.model.PixelsI(pixels_id, False)
+    q_def = omero.model.QuantumDefI()
+    q_def.cdStart = rint(0)
+    q_def.cdEnd = rint(255)
+    # Flag to select a 8-bit depth (<i>=2^8-1</i>) output interval
+    q_def.bitResolution = rint(255)
+    rnd_def.quantization = q_def
+    rnd_def.pixels = omero.model.PixelsI(pixels_id, False)
 
-    pixels_min = iinfo(pixels_type).min
-    pixels_max = iinfo(pixels_type).max
-    for index, entry in enumerate(omero_info.get('channels', [])):
-        if rnd_def is not None:
-            cb = omero.model.ChannelBindingI()
-            rnd_def.addChannelBinding(cb)
-            cb.coefficient = rdouble(entry.get('coefficient', 1.0))
-            cb.active = rbool(entry.get('active', False))
-            value = entry.get('family', "linear")
-            ref_family = None
-            for f in families:
-                fv = f.getValue()._val
-                if fv == "linear":
-                    ref_family = f
-                if fv == value:
-                    cb.family = f
-            if cb.family is None:
-                cb.family = ref_family
+    if pixels_type.startswith('float'):
+        pixels_min = finfo(pixels_type).min
+        pixels_max = finfo(pixels_type).max
+    else:
+        pixels_min = iinfo(pixels_type).min
+        pixels_max = iinfo(pixels_type).max
+    for entry in omero_info.get('channels', []):
+        cb = omero.model.ChannelBindingI()
+        rnd_def.addChannelBinding(cb)
+        cb.coefficient = rdouble(entry.get('coefficient', 1.0))
+        cb.active = rbool(entry.get('active', False))
+        value = entry.get('family', "linear")
+        ref_family = None
+        for f in families:
+            fv = f.getValue()._val
+            if fv == "linear":
+                ref_family = f
+            if fv == value:
+                cb.family = f
+        if cb.family is None:
+            cb.family = ref_family
 
-            # convert color to rgba
-            rgb = hex_to_rgba(entry.get('color', "000000")) # default to black is no color set
-            cb.red = rint(rgb[0])
-            cb.green = rint(rgb[1])
-            cb.blue = rint(rgb[2])
-            cb.alpha = rint(255)
-            cb.noiseReduction = rbool(False)
+        # convert color to rgba
+        rgb = hex_to_rgba(entry.get('color', "000000").lstrip("#")) # default to black is no color set
+        cb.red = rint(rgb[0])
+        cb.green = rint(rgb[1])
+        cb.blue = rint(rgb[2])
+        cb.alpha = rint(255)
+        cb.noiseReduction = rbool(False)
 
-            window = entry.get("window", None)
-            if window:
-                cb.inputStart = rdouble(window.get("start", pixels_min))
-                cb.inputEnd = rdouble(window.get("end", pixels_max))
-            inverted = entry.get("inverted", False)
-            if inverted: # add codomain
-                ric = omero.model.ReverseIntensityContextI()
-                ric.reverse = rbool(inverted)
-                cb.addCodomainMapContext(ric)
+        window = entry.get("window", None)
+        if window:
+            cb.inputStart = rdouble(window.get("start", pixels_min))
+            cb.inputEnd = rdouble(window.get("end", pixels_max))
+        inverted = entry.get("inverted", False)
+        if inverted: # add codomain
+            ric = omero.model.ReverseIntensityContextI()
+            ric.reverse = rbool(inverted)
+            cb.addCodomainMapContext(ric)
     return rnd_def
-        
+
 
 def load_families(query_service):
     ctx = {'omero.group': '-1'}
@@ -319,7 +322,7 @@ def load_families(query_service):
 def load_models(query_service):
     ctx = {'omero.group': '-1'}
     return query_service.findAllByQuery('select f from RenderingModel as f', None, ctx)
- 
+
 
 def register_image(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
     """
@@ -371,7 +374,7 @@ def create_plate_acquisition(pa):
     if pa.get("endtime"):
         plate_acquisition.endTime = rint(pa.get("endtime"))
     return plate_acquisition
-    
+
 
 def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
     '''
@@ -389,7 +392,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
     query_service = conn.getQueryService()
     families = load_families(query_service)
     models = load_models(query_service)
-    
+
     # Create a plate
     plate = omero.model.PlateI()
     plate.name = rstring(object_name)
@@ -397,7 +400,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
     plate.rowNamingConvention = rstring(determine_naming(plate_attrs['rows']))
     plate.rows = rint(len(plate_attrs['rows']))
     plate.columns = rint(len(plate_attrs['columns']))
-    
+
     acquisitions = plate_attrs.get('acquisitions')
     plate_acquisitions = {}
     if acquisitions is not None and len(acquisitions) > 1:
@@ -431,7 +434,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
 
         well_attrs = load_attrs(f"{uri}{well_path}/", transport_params)
         well_samples_attrs = well_attrs["well"]["images"]
-        
+
 
         for sample_attrs in well_samples_attrs:
             image_uri = f"{uri}{well_path}/{sample_attrs['path']}/"
@@ -520,7 +523,7 @@ def main():
     parser.add_argument("--endpoint", required=False, type=str, help="Enter the URL endpoint if applicable")
     parser.add_argument("--name", required=False, type=str, help="The name of the plate")
     parser.add_argument("--nosignrequest", required=False, action='store_true', help="Indicate to sign anonymously")
-        
+
     with cli_login() as cli:
         conn = BlitzGateway(client_obj=cli._client)
 
@@ -555,3 +558,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
