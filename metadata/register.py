@@ -343,7 +343,7 @@ def register_image(conn, uri, name=None, transport_params=None, endpoint=None, u
     update_service.saveAndReturnObject(rnd_def)
 
     print("Created Image", image.id.val)
-    return image.id.val
+    return image
 
 
 def determine_naming(values):
@@ -461,7 +461,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
         update_service.saveAndReturnIds(rnd_defs)
 
     print("Plate created with id:", plate.id.val)
-    return plate.id.val
+    return plate
 
 
 def set_external_info(uri, image, endpoint=None, uri_parameters=None):
@@ -515,24 +515,42 @@ def get_uri_parameters(transport_params, nosignrequest):
         return "?anonymous=true"
     return None
 
-def get_target(args, conn, is_plate):
+def link_to_target(args, conn, obj):
+    is_plate = isinstance(obj, omero.model.PlateI)
+
     if args.target:
         if is_plate:
-            return conn.getObject("Screen", attributes={'id': int(args.target)})
+            target = conn.getObject("Screen", attributes={'id': int(args.target)})
         else:
-            return conn.getObject("Dataset", attributes={'id': int(args.target)})
-    if args.target_by_name:
+            target = conn.getObject("Dataset", attributes={'id': int(args.target)})
+    else:
         if is_plate:
-            return conn.getObject("Screen", attributes={'name': args.target_by_name})
+            target = conn.getObject("Screen", attributes={'name': args.target_by_name})
         else:
-            return conn.getObject("Dataset", attributes={'name': args.target_by_name})
-    return None
+            target = conn.getObject("Dataset", attributes={'name': args.target_by_name})
+
+    if target is None:
+        print("Target not found")
+        return
+
+    if is_plate:
+        link = omero.model.ScreenPlateLinkI()
+        link.parent = omero.model.ScreenI(target.getId(), False)
+        link.child = omero.model.PlateI(obj.getId(), False)
+        conn.getUpdateService().saveObject(link)
+        print("Linked to Screen", target.getId())
+    else:
+        link = omero.model.DatasetImageLinkI()
+        link.parent = omero.model.DatasetI(target.getId(), False)
+        link.child = omero.model.ImageI(obj.getId(), False)
+        conn.getUpdateService().saveObject(link)
+        print("Linked to Dataset", target.getId())
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("uri", type=str, help="The URI to the S3 store")
     parser.add_argument("--endpoint", required=False, type=str, help="Enter the URL endpoint if applicable")
-    parser.add_argument("--name", required=False, type=str, help="The name of the plate")
+    parser.add_argument("--name", required=False, type=str, help="The name of the image/plate")
     parser.add_argument("--nosignrequest", required=False, action='store_true', help="Indicate to sign anonymously")
     parser.add_argument("--target", required=False, type=str, help="The id of the target (dataset/screen)")
     parser.add_argument("--target-by-name", required=False, type=str, help="The name of the target (dataset/screen)")
@@ -565,21 +583,13 @@ def main():
         print("type_to_register, uri", type_to_register, uri)
 
         if type_to_register == OBJECT_PLATE:
-            plate_id = register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
-            target = get_target(args, conn, True)
-            if target is not None:
-                link = omero.model.ScreenPlateLinkI()
-                link.parent = omero.model.ScreenI(target.getId(), False)
-                link.child = omero.model.PlateI(plate_id, False)
-                conn.getUpdateService().saveObject(link)
+            obj = register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            
         else:
-            image_id = register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
-            target = get_target(args, conn, False)
-            if target is not None:
-                link = omero.model.DatasetImageLinkI()
-                link.parent = omero.model.DatasetI(target.getId(), False)
-                link.child = omero.model.ImageI(image_id, False)
-                conn.getUpdateService().saveObject(link)
+            obj = register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+
+        if args.target or args.target_by_name:
+            link_to_target(args, conn, obj)
 
 if __name__ == "__main__":
     main()
