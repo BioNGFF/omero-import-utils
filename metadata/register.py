@@ -343,6 +343,7 @@ def register_image(conn, uri, name=None, transport_params=None, endpoint=None, u
     update_service.saveAndReturnObject(rnd_def)
 
     print("Created Image", image.id.val)
+    return image.id.val
 
 
 def determine_naming(values):
@@ -460,6 +461,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
         update_service.saveAndReturnIds(rnd_defs)
 
     print("Plate created with id:", plate.id.val)
+    return plate.id.val
 
 
 def set_external_info(uri, image, endpoint=None, uri_parameters=None):
@@ -513,6 +515,18 @@ def get_uri_parameters(transport_params, nosignrequest):
         return "?anonymous=true"
     return None
 
+def get_target(args, conn, is_plate):
+    if args.target:
+        if is_plate:
+            return conn.getObject("Screen", attributes={'id': int(args.target)})
+        else:
+            return conn.getObject("Dataset", attributes={'id': int(args.target)})
+    if args.target_by_name:
+        if is_plate:
+            return conn.getObject("Screen", attributes={'name': args.target_by_name})
+        else:
+            return conn.getObject("Dataset", attributes={'name': args.target_by_name})
+    return None
 
 def main():
     parser = argparse.ArgumentParser()
@@ -520,11 +534,13 @@ def main():
     parser.add_argument("--endpoint", required=False, type=str, help="Enter the URL endpoint if applicable")
     parser.add_argument("--name", required=False, type=str, help="The name of the plate")
     parser.add_argument("--nosignrequest", required=False, action='store_true', help="Indicate to sign anonymously")
-        
+    parser.add_argument("--target", required=False, type=str, help="The id of the target (dataset/screen)")
+    parser.add_argument("--target-by-name", required=False, type=str, help="The name of the target (dataset/screen)")
+
+    args = parser.parse_args()
+
     with cli_login() as cli:
         conn = BlitzGateway(client_obj=cli._client)
-
-        args = parser.parse_args()
         uri = args.uri
         endpoint = args.endpoint
         nosignrequest = args.nosignrequest
@@ -549,9 +565,21 @@ def main():
         print("type_to_register, uri", type_to_register, uri)
 
         if type_to_register == OBJECT_PLATE:
-            register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            plate_id = register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            target = get_target(args, conn, True)
+            if target is not None:
+                link = omero.model.ScreenPlateLinkI()
+                link.parent = omero.model.ScreenI(target.getId(), False)
+                link.child = omero.model.PlateI(plate_id, False)
+                conn.getUpdateService().saveObject(link)
         else:
-            register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            image_id = register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            target = get_target(args, conn, False)
+            if target is not None:
+                link = omero.model.DatasetImageLinkI()
+                link.parent = omero.model.DatasetI(target.getId(), False)
+                link.child = omero.model.ImageI(image_id, False)
+                conn.getUpdateService().saveObject(link)
 
 if __name__ == "__main__":
     main()
