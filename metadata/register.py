@@ -132,7 +132,10 @@ def load_attrs(uri, transport_params=None, extension=None):
                 with open(path) as f:
                     zattrs = json.load(f)
             if "attributes" in zattrs:
-                zattrs = zattrs["attributes"]["ome"]
+                zattrs_ome = zattrs["attributes"].get("ome")
+                if zattrs_ome is None:
+                    return zattrs
+                zattrs = zattrs_ome
             return zattrs
         except Exception as e:
             pass
