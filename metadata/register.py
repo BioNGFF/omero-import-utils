@@ -20,16 +20,11 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 from urllib.parse import urlsplit
-import os
+import zarr
 
 import argparse
-import json
-try:
-    from smart_open import open as sm_open
-except ImportError:
-    sm_open = None
 
-from numpy import dtype, iinfo, finfo
+from numpy import iinfo, finfo
 
 # from getpass import getpass
 
@@ -82,90 +77,34 @@ def format_s3_uri(uri, endpoint):
     return "{0.scheme}".format(parsed_uri) + "://" + endpoint + "/" + url + "{0.path}".format(parsed_uri)
 
 
-def create_client(endpoint, nosignrequest=False):
+def load_array(store, path=None):
+    print("load_array", store, path)
+    arr = zarr.open(store=store, mode="r", path=path)
+    return arr
+
+
+def load_attrs(store, path=None):
     """
-    Create a boto3 client to connect to S3
+    Load the attrs from the root group or path subgroup
     """
-    config = None
-
-    try:
-        import boto3
-        import botocore
-        import botocore.client
-    except ImportError:
-        print("boto3 and botocore required for s3 URLs.")
-        raise
-
-    if nosignrequest:
-        config = botocore.client.Config(signature_version=botocore.UNSIGNED)
-    session = boto3.Session()
-    if endpoint:
-        if config:
-            client = session.client('s3', endpoint_url=endpoint, config=config)
-        else:
-            client = session.client('s3', endpoint_url=endpoint)
-    else:
-        if config:
-            client = session.client('s3', config=config)
-        else:
-            client = session.client('s3')
-    transport_params = {'client': client}
-    return transport_params
+    print("load_attrs", store, path)
+    root = zarr.open(store=store, mode="r", path=path)
+    attrs = root.attrs.asdict()
+    if "ome" in attrs:
+        attrs = attrs["ome"]
+    return attrs
 
 
-def load_attrs(uri, transport_params=None, extension=None):
-    """
-    Load the attributes from the zattrs file
-    """
-    extensions = ["zarr.json", ".zattrs"]
-    if extension is not None:
-        extensions = [extension] + extensions
-    for ext in extensions:
-        path = uri + ext
-        try:
-            if transport_params is not None:
-                if sm_open is None:
-                    raise ImportError("smart_open needed for remote URLs but not Installed")
-                with sm_open(path, 'rb', transport_params=transport_params) as f:
-                    zattrs = json.load(f)
-            else:
-                with open(path) as f:
-                    zattrs = json.load(f)
-            if "attributes" in zattrs:
-                zattrs_ome = zattrs["attributes"].get("ome")
-                if zattrs_ome is None:
-                    return zattrs
-                zattrs = zattrs_ome
-            return zattrs
-        except Exception as e:
-            pass
-
-    raise FileNotFoundError(f"Could not load attributes from {uri}. Tried extensions: {extensions}")
-
-
-def determine_object_to_register(uri, transport_params=None):
-    """
-    Determine the object to register: supported Plate and Image
-    """
-    zattrs = load_attrs(uri, transport_params)
-    if "plate" in zattrs:
-        return OBJECT_PLATE, uri
-    if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
-        uri = f"{uri}0/"
-    return OBJECT_IMAGE, uri
-
-
-def parse_image_metadata(uri, img_attrs, transport_params=None):
+def parse_image_metadata(store, img_attrs):
     """
     Parse the image metadata
     """
     multiscale_attrs = img_attrs['multiscales'][0]
     array_path = multiscale_attrs["datasets"][0]["path"]
     # load .zarray from path to know the dimension
-    array_data = load_attrs(f"{uri}{array_path}/", transport_params=transport_params,
-                            extension=".zarray")
+    array_data = load_array(store, array_path)
     sizes = {}
-    shape = array_data["shape"]
+    shape = array_data.shape
     axes = multiscale_attrs.get("axes")
     # Need to check the older version
     if axes:
@@ -175,21 +114,17 @@ def parse_image_metadata(uri, img_attrs, transport_params=None):
             else:
                 sizes[axis["name"]] = size
 
-    if "data_type" in array_data:
-        data_type_key = "data_type"
-    else:
-        data_type_key = "dtype"
-    pixels_type = dtype(array_data[data_type_key]).name
+    pixels_type = array_data.dtype.name
     return sizes, pixels_type
 
 
-def create_image(conn, image_attrs, image_uri, object_name, families, models, transport_params=None, endpoint=None, uri_parameters=None):
+def create_image(conn, store, image_attrs, object_name, families, models, args, image_path=None):
     '''
     Create an Image/Pixels object
     '''
     query_service = conn.getQueryService()
     pixels_service = conn.getPixelsService()
-    sizes, pixels_type = parse_image_metadata(image_uri, image_attrs, transport_params)
+    sizes, pixels_type = parse_image_metadata(store, image_attrs)
     size_t = sizes.get("t", 1)
     size_z = sizes.get("z", 1)
     size_x = sizes.get("x", 1)
@@ -206,7 +141,7 @@ def create_image(conn, image_attrs, image_uri, object_name, families, models, tr
 
     image = conn.getObject("Image", iid)
     img_obj = image._obj
-    set_external_info(image_uri, img_obj, endpoint=endpoint, uri_parameters=uri_parameters)
+    set_external_info(img_obj, args, image_path)
     # Check rendering settings
     rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
 
@@ -327,7 +262,7 @@ def load_models(query_service):
     return query_service.findAllByQuery('select f from RenderingModel as f', None, ctx)
 
 
-def register_image(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
+def register_image(conn, store, args, img_attrs=None):
     """
     Register the ome.zarr image in OMERO.
     """
@@ -337,14 +272,15 @@ def register_image(conn, uri, name=None, transport_params=None, endpoint=None, u
     families = load_families(query_service)
     models = load_models(query_service)
 
-    img_attrs = load_attrs(uri, transport_params)
-    if name:
-        image_name = name
+    if img_attrs is None:
+        img_attrs = load_attrs(store)
+    if args.name:
+        image_name = args.name
     elif "name" in img_attrs:
         image_name = img_attrs["name"]
     else:
-        image_name = uri.rstrip("/").split("/")[-1]
-    image, rnd_def = create_image(conn, img_attrs, uri, image_name, families, models, transport_params, endpoint, uri_parameters)
+        image_name = args.uri.rstrip("/").split("/")[-1]
+    image, rnd_def = create_image(conn, store, img_attrs, image_name, families, models, args)
     update_service.saveAndReturnObject(image)
     update_service.saveAndReturnObject(rnd_def)
 
@@ -441,9 +377,9 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
 
 
         for sample_attrs in well_samples_attrs:
-            image_uri = f"{uri}{well_path}/{sample_attrs['path']}/"
+            image_path = f"{well_path}/{sample_attrs['path']}/"
 
-            img_attrs = load_attrs(image_uri, transport_params)
+            img_attrs = load_attrs(store, image_path)
             image_name = img_attrs.get('name', f"{well_path}/{sample_attrs['path']}")
 
             image, rnd_def = create_image(conn, img_attrs, image_uri, image_name, families, models, transport_params, endpoint, uri_parameters)
@@ -470,7 +406,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
     return plate
 
 
-def set_external_info(uri, image, endpoint=None, uri_parameters=None):
+def set_external_info(image, args, image_path=None):
     '''
     Create the external info and link it to the image
     '''
@@ -478,15 +414,33 @@ def set_external_info(uri, image, endpoint=None, uri_parameters=None):
     # non-nullable properties
     setattr(extinfo, "entityId", rlong(3))
     setattr(extinfo, "entityType", rstring("com.glencoesoftware.ngff:multiscales"))
+
+    uri = args.uri
+    parsed_uri = urlsplit(uri)
+    scheme = "{0.scheme}".format(parsed_uri)
+    # e.g. https://storage.googleapis.com/jax-public-ngff/example_v2/LacZ_ctrl.zarr/0 
+    # lsid s3://storage.googleapis.com/jax-public-ngff/example_v2/LacZ_ctrl.zarr/0/?anonymous=true
+
+    # https://uk1s3.embassy.ebi.ac.uk/idr/zarr/v0.5/idr0010/76-45.ome.zarr
+    # --endpoint https://uk1s3.embassy.ebi.ac.uk/ --nosignrequest s3://idr/zarr/v0.5/idr0010/76-45.ome.zarr
+
+    nosignrequest = args.nosignrequest
+
+    if "http" in scheme:
+        nosignrequest = True
+        path = "{0.path}".format(parsed_uri)
+        if path.startswith("/"):
+            path = path[1:]
+        uri = "s3://" + path
+    
     if not uri.startswith("/"):
-        uri = format_s3_uri(uri, endpoint)
-    if uri_parameters:
+        uri = format_s3_uri(uri, args.endpoint)
+    if nosignrequest:
         if not uri.endswith("/"):
             uri = uri + "/"
-        uri = uri + uri_parameters
-    if uri.endswith("/"): # check with Will
-        uri = uri[:-1]
+        uri = uri + "?anonymous=true"
     setattr(extinfo, "lsid", rstring(uri))
+    print("lsid:", uri)
     image.details.externalInfo = extinfo
 
 def validate_uri(uri):
@@ -569,30 +523,36 @@ def main():
         endpoint = args.endpoint
         nosignrequest = args.nosignrequest
         validate_endpoint(endpoint)
+        store = None
         if uri.startswith("/"):
-            transport_params = None
+            store = zarr.storage.LocalStore(uri, read_only=True)
         else:
-            parsed_uri = urlsplit(uri)
-            scheme = "{0.scheme}".format(parsed_uri)
-            if "http" in scheme:
-                endpoint = "https://" + "{0.netloc}".format(parsed_uri)
-                nosignrequest = True
-                path = "{0.path}".format(parsed_uri)
-                if path.startswith("/"):
-                    path = path[1:]
-                uri = "s3://" + path
+            storage_options={}
+            if nosignrequest:
+                storage_options['anon'] = True
 
-            uri = validate_uri(uri)
-            transport_params = create_client(endpoint, nosignrequest)
-        params = get_uri_parameters(transport_params, nosignrequest)
-        type_to_register, uri = determine_object_to_register(uri, transport_params)
-        print("type_to_register, uri", type_to_register, uri)
+            if endpoint:
+                storage_options['client_kwargs'] = {'endpoint_url': endpoint}
 
-        if type_to_register == OBJECT_PLATE:
-            obj = register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
-            
+            store = zarr.storage.FsspecStore.from_url(uri,
+                read_only=True,
+                storage_options=storage_options
+            )
+            print("store", store)
+            print("store.path", store.path)
+
+        zattrs = load_attrs(store)
+        if "plate" in zattrs:
+            print("Registering: ", OBJECT_PLATE)
+            obj = register_plate(conn, uri, args.name, store)
         else:
-            obj = register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            # TODO: if we have multiple images, register them ALL
+            if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
+                raise NotImplementedError("bioformats2raw.layout not handled yet")
+                # uri = f"{uri}0/"
+
+            print("Registering: ", OBJECT_IMAGE)
+            obj = register_image(conn, store, args, zattrs)
 
         if args.target or args.target_by_name:
             link_to_target(args, conn, obj)
