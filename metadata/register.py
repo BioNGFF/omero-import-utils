@@ -42,13 +42,7 @@ from omero.model.enums import PixelsTypecomplex, PixelsTypedouble
 from omero.model import ExternalInfoI
 from omero.rtypes import rbool, rdouble, rint, rlong, rstring
 
-
-EXTENSION_JSON = "zarr.json"
-
 AWS_DEFAULT_ENDPOINT = "s3.us-east-1.amazonaws.com"
-
-OBJECT_PLATE = "plate"
-OBJECT_IMAGE = "image"
 
 PIXELS_TYPE = {'int8': PixelsTypeint8,
                'int16': PixelsTypeint16,
@@ -262,7 +256,7 @@ def load_models(query_service):
     return query_service.findAllByQuery('select f from RenderingModel as f', None, ctx)
 
 
-def register_image(conn, store, args, img_attrs=None):
+def register_image(conn, store, args, img_attrs=None, image_path=None):
     """
     Register the ome.zarr image in OMERO.
     """
@@ -273,14 +267,14 @@ def register_image(conn, store, args, img_attrs=None):
     models = load_models(query_service)
 
     if img_attrs is None:
-        img_attrs = load_attrs(store)
+        img_attrs = load_attrs(store, image_path)
     if args.name:
         image_name = args.name
     elif "name" in img_attrs:
         image_name = img_attrs["name"]
     else:
         image_name = args.uri.rstrip("/").split("/")[-1]
-    image, rnd_def = create_image(conn, store, img_attrs, image_name, families, models, args)
+    image, rnd_def = create_image(conn, store, img_attrs, image_name, families, models, args, image_path=image_path)
     update_service.saveAndReturnObject(image)
     update_service.saveAndReturnObject(rnd_def)
 
@@ -542,20 +536,30 @@ def main():
             )
 
         zattrs = load_attrs(store)
+        objs = []
         if "plate" in zattrs:
-            print("Registering: ", OBJECT_PLATE)
-            obj = register_plate(conn, store, args, zattrs)
+            print("Registering: Plate")
+            objs = [register_plate(conn, store, args, zattrs)]
         else:
-            # TODO: if we have multiple images, register them ALL
             if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
-                raise NotImplementedError("bioformats2raw.layout not handled yet")
-                # uri = f"{uri}0/"
-
-            print("Registering: ", OBJECT_IMAGE)
-            obj = register_image(conn, store, args, zattrs)
+                print("Registering: bioformats2raw.layout")
+                series = 0
+                series_exists = True
+                while series_exists:
+                    try:
+                        print("Checking for series:", series)
+                        obj = register_image(conn, store, args, None, image_path=str(series))
+                        objs.append(obj)
+                    except FileNotFoundError:
+                        series_exists = False
+                    series += 1
+            else:
+                print("Registering: Image")
+                objs = [register_image(conn, store, args, zattrs)]
 
         if args.target or args.target_by_name:
-            link_to_target(args, conn, obj)
+            for obj in objs:
+                link_to_target(args, conn, obj)
 
 if __name__ == "__main__":
     main()
