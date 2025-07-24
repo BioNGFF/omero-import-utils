@@ -274,6 +274,8 @@ def register_image(conn, store, args, img_attrs=None, image_path=None):
         image_name = img_attrs["name"]
     else:
         image_name = args.uri.rstrip("/").split("/")[-1]
+        if image_path is not None:
+            image_name = f"{image_name} [{image_path}]"
     image, rnd_def = create_image(conn, store, img_attrs, image_name, families, models, args, image_path=image_path)
     update_service.saveAndReturnObject(image)
     update_service.saveAndReturnObject(rnd_def)
