@@ -95,12 +95,14 @@ def load_attrs(store, path=None):
     return attrs
 
 
-def parse_image_metadata(store, img_attrs):
+def parse_image_metadata(store, img_attrs, image_path=None):
     """
     Parse the image metadata
     """
     multiscale_attrs = img_attrs['multiscales'][0]
     array_path = multiscale_attrs["datasets"][0]["path"]
+    if image_path is not None:
+        array_path = f"{image_path.rstrip("/")}/{array_path}"
     # load .zarray from path to know the dimension
     array_data = load_array(store, array_path)
     sizes = {}
@@ -124,7 +126,7 @@ def create_image(conn, store, image_attrs, object_name, families, models, args, 
     '''
     query_service = conn.getQueryService()
     pixels_service = conn.getPixelsService()
-    sizes, pixels_type = parse_image_metadata(store, image_attrs)
+    sizes, pixels_type = parse_image_metadata(store, image_attrs, image_path)
     size_t = sizes.get("t", 1)
     size_z = sizes.get("z", 1)
     size_x = sizes.get("x", 1)
@@ -316,17 +318,19 @@ def create_plate_acquisition(pa):
     return plate_acquisition
 
 
-def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
+# def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
+def register_plate(conn, store, args, attrs):
     '''
     Register a plate
     '''
-    plate_attrs = load_attrs(uri, transport_params)["plate"]
 
-    object_name = name
+    plate_attrs = attrs["plate"]
+
+    object_name = args.name
     if object_name is None:
         object_name = plate_attrs.get("name", None)
     if object_name is None:
-        object_name = uri.rstrip("/").split("/")[-1].split(".")[0]
+        object_name = args.uri.rstrip("/").split("/")[-1].split(".")[0]
 
     update_service = conn.getUpdateService()
     query_service = conn.getQueryService()
@@ -350,6 +354,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
             plate.addPlateAcquisition(omero.model.PlateAcquisitionI(plate_acquisition.getId(), False))
 
     plate = update_service.saveAndReturnObject(plate)
+    print("Plate created with id:", plate.id.val)
 
     # for Platani plate - bug in omero-cli-zarr - dupliate Wells!
     well_paths = []
@@ -372,7 +377,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
         well.column = rint(column_index)
         well.row = rint(row_index)
 
-        well_attrs = load_attrs(f"{uri}{well_path}/", transport_params)
+        well_attrs = load_attrs(store, well_path)
         well_samples_attrs = well_attrs["well"]["images"]
 
 
@@ -382,7 +387,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
             img_attrs = load_attrs(store, image_path)
             image_name = img_attrs.get('name', f"{well_path}/{sample_attrs['path']}")
 
-            image, rnd_def = create_image(conn, img_attrs, image_uri, image_name, families, models, transport_params, endpoint, uri_parameters)
+            image, rnd_def = create_image(conn, store, img_attrs, image_name, families, models, args, image_path)
 
             images_to_save.append(image)
             rnd_defs.append(rnd_def)
@@ -416,6 +421,8 @@ def set_external_info(image, args, image_path=None):
     setattr(extinfo, "entityType", rstring("com.glencoesoftware.ngff:multiscales"))
 
     uri = args.uri
+    if image_path is not None:
+        uri = f"{uri.rstrip("/")}/{image_path}"
     parsed_uri = urlsplit(uri)
     scheme = "{0.scheme}".format(parsed_uri)
     # e.g. https://storage.googleapis.com/jax-public-ngff/example_v2/LacZ_ctrl.zarr/0 
@@ -544,7 +551,7 @@ def main():
         zattrs = load_attrs(store)
         if "plate" in zattrs:
             print("Registering: ", OBJECT_PLATE)
-            obj = register_plate(conn, uri, args.name, store)
+            obj = register_plate(conn, store, args, zattrs)
         else:
             # TODO: if we have multiple images, register them ALL
             if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
