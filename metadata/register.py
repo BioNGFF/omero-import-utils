@@ -78,7 +78,6 @@ def format_s3_uri(uri, endpoint):
 
 
 def load_array(store, path=None):
-    print("load_array", store, path)
     arr = zarr.open(store=store, mode="r", path=path)
     return arr
 
@@ -87,7 +86,6 @@ def load_attrs(store, path=None):
     """
     Load the attrs from the root group or path subgroup
     """
-    print("load_attrs", store, path)
     root = zarr.open(store=store, mode="r", path=path)
     attrs = root.attrs.asdict()
     if "ome" in attrs:
@@ -421,19 +419,16 @@ def set_external_info(image, args, image_path=None):
     setattr(extinfo, "entityType", rstring("com.glencoesoftware.ngff:multiscales"))
 
     uri = args.uri
+    endpoint = args.endpoint
+    nosignrequest = args.nosignrequest
+
     if image_path is not None:
         uri = f"{uri.rstrip("/")}/{image_path}"
     parsed_uri = urlsplit(uri)
     scheme = "{0.scheme}".format(parsed_uri)
-    # e.g. https://storage.googleapis.com/jax-public-ngff/example_v2/LacZ_ctrl.zarr/0 
-    # lsid s3://storage.googleapis.com/jax-public-ngff/example_v2/LacZ_ctrl.zarr/0/?anonymous=true
-
-    # https://uk1s3.embassy.ebi.ac.uk/idr/zarr/v0.5/idr0010/76-45.ome.zarr
-    # --endpoint https://uk1s3.embassy.ebi.ac.uk/ --nosignrequest s3://idr/zarr/v0.5/idr0010/76-45.ome.zarr
-
-    nosignrequest = args.nosignrequest
 
     if "http" in scheme:
+        endpoint = "https://" + "{0.netloc}".format(parsed_uri)
         nosignrequest = True
         path = "{0.path}".format(parsed_uri)
         if path.startswith("/"):
@@ -441,7 +436,7 @@ def set_external_info(image, args, image_path=None):
         uri = "s3://" + path
     
     if not uri.startswith("/"):
-        uri = format_s3_uri(uri, args.endpoint)
+        uri = format_s3_uri(uri, endpoint)
     if nosignrequest:
         if not uri.endswith("/"):
             uri = uri + "/"
@@ -545,8 +540,6 @@ def main():
                 read_only=True,
                 storage_options=storage_options
             )
-            print("store", store)
-            print("store.path", store.path)
 
         zattrs = load_attrs(store)
         if "plate" in zattrs:
