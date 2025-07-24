@@ -40,7 +40,7 @@ from omero.model.enums import PixelsTypeuint32, PixelsTypefloat
 from omero.model.enums import PixelsTypecomplex, PixelsTypedouble
 
 from omero.model import ExternalInfoI
-from omero.rtypes import rbool, rdouble, rint, rlong, rstring
+from omero.rtypes import rbool, rdouble, rint, rlong, rstring, rtime
 
 AWS_DEFAULT_ENDPOINT = "s3.us-east-1.amazonaws.com"
 
@@ -304,9 +304,9 @@ def create_plate_acquisition(pa):
     if pa.get("maximumfieldcount"):
         plate_acquisition.maximumFieldCount = rint(pa.get("maximumfieldcount"))
     if pa.get("starttime"):
-        plate_acquisition.startTime = rint(pa.get("starttime"))
+        plate_acquisition.startTime = rtime(pa.get("starttime"))
     if pa.get("endtime"):
-        plate_acquisition.endTime = rint(pa.get("endtime"))
+        plate_acquisition.endTime = rtime(pa.get("endtime"))
     return plate_acquisition
 
 
@@ -341,17 +341,25 @@ def register_plate(conn, store, args, attrs):
     plate_acquisitions = {}
     if acquisitions is not None and len(acquisitions) > 1:
         for pa in acquisitions:
-            plate_acquisition =  update_service.saveAndReturnObject(create_plate_acquisition(pa))
-            plate_acquisitions[pa.get("id")] = plate_acquisition
-            plate.addPlateAcquisition(omero.model.PlateAcquisitionI(plate_acquisition.getId(), False))
+            plate_acquisition = create_plate_acquisition(pa)
+            plate.addPlateAcquisition(plate_acquisition)
 
     plate = update_service.saveAndReturnObject(plate)
     print("Plate created with id:", plate.id.val)
 
-    # for Platani plate - bug in omero-cli-zarr - dupliate Wells!
+    # load the new plate acquisitions and map them to the original IDs
+    if acquisitions is not None and len(acquisitions) > 1:
+        pwrapper = conn.getObject("Plate", plate.id.val)
+        pas = list(pwrapper.listPlateAcquisitions())
+        for pa, saved in zip(acquisitions, pas):
+            plate_acquisitions[pa["id"]] = saved.id
+        print('plate_acquisitions', plate_acquisitions)
+
+    # for bug in omero-cli-zarr - need to handle dupliate Wells!
     well_paths = []
 
-    for well_attrs in plate_attrs["wells"]:
+    well_count = len(plate_attrs["wells"])
+    for well_index, well_attrs in enumerate(plate_attrs["wells"]):
         images_to_save = []
         rnd_defs = []
         # read metadata
@@ -362,7 +370,7 @@ def register_plate(conn, store, args, attrs):
             continue
         else:
             well_paths.append(well_path)
-        print("well_path", well_path)
+        print("well_path", well_path, f"({well_index}/{well_count})")
         # create OMERO object
         well = omero.model.WellI()
         well.plate = omero.model.PlateI(plate.getId(), False)
@@ -387,9 +395,9 @@ def register_plate(conn, store, args, attrs):
             ws = omero.model.WellSampleI()
             if 'acquisition' in sample_attrs:
                 acquisition_id = sample_attrs['acquisition']
-                pa = plate_acquisitions.get(acquisition_id)
+                pa_id = plate_acquisitions.get(acquisition_id)
                 if pa is not None:
-                    ws.plateAcquisition = omero.model.PlateAcquisitionI(pa.getId(), False)
+                    ws.plateAcquisition = omero.model.PlateAcquisitionI(pa_id, False)
             ws.image = omero.model.ImageI(image.id.val, False)
             ws.well = well
             well.addWellSample(ws)
