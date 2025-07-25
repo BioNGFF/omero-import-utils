@@ -94,7 +94,7 @@ def parse_image_metadata(store, img_attrs, image_path=None):
     multiscale_attrs = img_attrs['multiscales'][0]
     array_path = multiscale_attrs["datasets"][0]["path"]
     if image_path is not None:
-        array_path = f"{image_path.rstrip("/")}/{array_path}"
+        array_path = f"{image_path}.rstrip("/")/{array_path}"
     # load .zarray from path to know the dimension
     array_data = load_array(store, array_path)
     sizes = {}
@@ -427,7 +427,7 @@ def set_external_info(image, args, image_path=None):
     nosignrequest = args.nosignrequest
 
     if image_path is not None:
-        uri = f"{uri.rstrip("/")}/{image_path}"
+        uri = f"{uri}.rstrip("/")/{image_path}"
     parsed_uri = urlsplit(uri)
     scheme = "{0.scheme}".format(parsed_uri)
 
