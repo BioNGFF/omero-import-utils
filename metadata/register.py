@@ -20,16 +20,11 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 from urllib.parse import urlsplit
-import os
+import zarr
 
 import argparse
-import json
-try:
-    from smart_open import open as sm_open
-except ImportError:
-    sm_open = None
 
-from numpy import dtype, iinfo, finfo
+from numpy import iinfo, finfo
 
 # from getpass import getpass
 
@@ -45,15 +40,9 @@ from omero.model.enums import PixelsTypeuint32, PixelsTypefloat
 from omero.model.enums import PixelsTypecomplex, PixelsTypedouble
 
 from omero.model import ExternalInfoI
-from omero.rtypes import rbool, rdouble, rint, rlong, rstring
-
-
-EXTENSION_JSON = "zarr.json"
+from omero.rtypes import rbool, rdouble, rint, rlong, rstring, rtime
 
 AWS_DEFAULT_ENDPOINT = "s3.us-east-1.amazonaws.com"
-
-OBJECT_PLATE = "plate"
-OBJECT_IMAGE = "image"
 
 PIXELS_TYPE = {'int8': PixelsTypeint8,
                'int16': PixelsTypeint16,
@@ -82,90 +71,34 @@ def format_s3_uri(uri, endpoint):
     return "{0.scheme}".format(parsed_uri) + "://" + endpoint + "/" + url + "{0.path}".format(parsed_uri)
 
 
-def create_client(endpoint, nosignrequest=False):
+def load_array(store, path=None):
+    arr = zarr.open(store=store, mode="r", path=path)
+    return arr
+
+
+def load_attrs(store, path=None):
     """
-    Create a boto3 client to connect to S3
+    Load the attrs from the root group or path subgroup
     """
-    config = None
-
-    try:
-        import boto3
-        import botocore
-        import botocore.client
-    except ImportError:
-        print("boto3 and botocore required for s3 URLs.")
-        raise
-
-    if nosignrequest:
-        config = botocore.client.Config(signature_version=botocore.UNSIGNED)
-    session = boto3.Session()
-    if endpoint:
-        if config:
-            client = session.client('s3', endpoint_url=endpoint, config=config)
-        else:
-            client = session.client('s3', endpoint_url=endpoint)
-    else:
-        if config:
-            client = session.client('s3', config=config)
-        else:
-            client = session.client('s3')
-    transport_params = {'client': client}
-    return transport_params
+    root = zarr.open(store=store, mode="r", path=path)
+    attrs = root.attrs.asdict()
+    if "ome" in attrs:
+        attrs = attrs["ome"]
+    return attrs
 
 
-def load_attrs(uri, transport_params=None, extension=None):
-    """
-    Load the attributes from the zattrs file
-    """
-    extensions = ["zarr.json", ".zattrs"]
-    if extension is not None:
-        extensions = [extension] + extensions
-    for ext in extensions:
-        path = uri + ext
-        try:
-            if transport_params is not None:
-                if sm_open is None:
-                    raise ImportError("smart_open needed for remote URLs but not Installed")
-                with sm_open(path, 'rb', transport_params=transport_params) as f:
-                    zattrs = json.load(f)
-            else:
-                with open(path) as f:
-                    zattrs = json.load(f)
-            if "attributes" in zattrs:
-                zattrs_ome = zattrs["attributes"].get("ome")
-                if zattrs_ome is None:
-                    return zattrs
-                zattrs = zattrs_ome
-            return zattrs
-        except Exception as e:
-            pass
-
-    raise FileNotFoundError(f"Could not load attributes from {uri}. Tried extensions: {extensions}")
-
-
-def determine_object_to_register(uri, transport_params=None):
-    """
-    Determine the object to register: supported Plate and Image
-    """
-    zattrs = load_attrs(uri, transport_params)
-    if "plate" in zattrs:
-        return OBJECT_PLATE, uri
-    if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
-        uri = f"{uri}0/"
-    return OBJECT_IMAGE, uri
-
-
-def parse_image_metadata(uri, img_attrs, transport_params=None):
+def parse_image_metadata(store, img_attrs, image_path=None):
     """
     Parse the image metadata
     """
     multiscale_attrs = img_attrs['multiscales'][0]
     array_path = multiscale_attrs["datasets"][0]["path"]
+    if image_path is not None:
+        array_path = image_path.rstrip("/") + "/" + array_path
     # load .zarray from path to know the dimension
-    array_data = load_attrs(f"{uri}{array_path}/", transport_params=transport_params,
-                            extension=".zarray")
+    array_data = load_array(store, array_path)
     sizes = {}
-    shape = array_data["shape"]
+    shape = array_data.shape
     axes = multiscale_attrs.get("axes")
     # Need to check the older version
     if axes:
@@ -175,21 +108,17 @@ def parse_image_metadata(uri, img_attrs, transport_params=None):
             else:
                 sizes[axis["name"]] = size
 
-    if "data_type" in array_data:
-        data_type_key = "data_type"
-    else:
-        data_type_key = "dtype"
-    pixels_type = dtype(array_data[data_type_key]).name
+    pixels_type = array_data.dtype.name
     return sizes, pixels_type
 
 
-def create_image(conn, image_attrs, image_uri, object_name, families, models, transport_params=None, endpoint=None, uri_parameters=None):
+def create_image(conn, store, image_attrs, object_name, families, models, args, image_path=None):
     '''
     Create an Image/Pixels object
     '''
     query_service = conn.getQueryService()
     pixels_service = conn.getPixelsService()
-    sizes, pixels_type = parse_image_metadata(image_uri, image_attrs, transport_params)
+    sizes, pixels_type = parse_image_metadata(store, image_attrs, image_path)
     size_t = sizes.get("t", 1)
     size_z = sizes.get("z", 1)
     size_x = sizes.get("x", 1)
@@ -206,7 +135,7 @@ def create_image(conn, image_attrs, image_uri, object_name, families, models, tr
 
     image = conn.getObject("Image", iid)
     img_obj = image._obj
-    set_external_info(image_uri, img_obj, endpoint=endpoint, uri_parameters=uri_parameters)
+    set_external_info(img_obj, args, image_path)
     # Check rendering settings
     rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
 
@@ -327,7 +256,7 @@ def load_models(query_service):
     return query_service.findAllByQuery('select f from RenderingModel as f', None, ctx)
 
 
-def register_image(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
+def register_image(conn, store, args, img_attrs=None, image_path=None):
     """
     Register the ome.zarr image in OMERO.
     """
@@ -337,14 +266,17 @@ def register_image(conn, uri, name=None, transport_params=None, endpoint=None, u
     families = load_families(query_service)
     models = load_models(query_service)
 
-    img_attrs = load_attrs(uri, transport_params)
-    if name:
-        image_name = name
+    if img_attrs is None:
+        img_attrs = load_attrs(store, image_path)
+    if args.name:
+        image_name = args.name
     elif "name" in img_attrs:
         image_name = img_attrs["name"]
     else:
-        image_name = uri.rstrip("/").split("/")[-1]
-    image, rnd_def = create_image(conn, img_attrs, uri, image_name, families, models, transport_params, endpoint, uri_parameters)
+        image_name = args.uri.rstrip("/").split("/")[-1]
+        if image_path is not None:
+            image_name = f"{image_name} [{image_path}]"
+    image, rnd_def = create_image(conn, store, img_attrs, image_name, families, models, args, image_path=image_path)
     update_service.saveAndReturnObject(image)
     update_service.saveAndReturnObject(rnd_def)
 
@@ -374,23 +306,25 @@ def create_plate_acquisition(pa):
     if pa.get("maximumfieldcount"):
         plate_acquisition.maximumFieldCount = rint(pa.get("maximumfieldcount"))
     if pa.get("starttime"):
-        plate_acquisition.startTime = rint(pa.get("starttime"))
+        plate_acquisition.startTime = rtime(pa.get("starttime"))
     if pa.get("endtime"):
-        plate_acquisition.endTime = rint(pa.get("endtime"))
+        plate_acquisition.endTime = rtime(pa.get("endtime"))
     return plate_acquisition
 
 
-def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
+# def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, uri_parameters=None):
+def register_plate(conn, store, args, attrs):
     '''
     Register a plate
     '''
-    plate_attrs = load_attrs(uri, transport_params)["plate"]
 
-    object_name = name
+    plate_attrs = attrs["plate"]
+
+    object_name = args.name
     if object_name is None:
         object_name = plate_attrs.get("name", None)
     if object_name is None:
-        object_name = uri.rstrip("/").split("/")[-1].split(".")[0]
+        object_name = args.uri.rstrip("/").split("/")[-1].split(".")[0]
 
     update_service = conn.getUpdateService()
     query_service = conn.getQueryService()
@@ -409,16 +343,25 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
     plate_acquisitions = {}
     if acquisitions is not None and len(acquisitions) > 1:
         for pa in acquisitions:
-            plate_acquisition =  update_service.saveAndReturnObject(create_plate_acquisition(pa))
-            plate_acquisitions[pa.get("id")] = plate_acquisition
-            plate.addPlateAcquisition(omero.model.PlateAcquisitionI(plate_acquisition.getId(), False))
+            plate_acquisition = create_plate_acquisition(pa)
+            plate.addPlateAcquisition(plate_acquisition)
 
     plate = update_service.saveAndReturnObject(plate)
+    print("Plate created with id:", plate.id.val)
 
-    # for Platani plate - bug in omero-cli-zarr - dupliate Wells!
+    # load the new plate acquisitions and map them to the original IDs
+    if acquisitions is not None and len(acquisitions) > 1:
+        pwrapper = conn.getObject("Plate", plate.id.val)
+        pas = list(pwrapper.listPlateAcquisitions())
+        for pa, saved in zip(acquisitions, pas):
+            plate_acquisitions[pa["id"]] = saved.id
+        print('plate_acquisitions', plate_acquisitions)
+
+    # for bug in omero-cli-zarr - need to handle dupliate Wells!
     well_paths = []
 
-    for well_attrs in plate_attrs["wells"]:
+    well_count = len(plate_attrs["wells"])
+    for well_index, well_attrs in enumerate(plate_attrs["wells"]):
         images_to_save = []
         rnd_defs = []
         # read metadata
@@ -429,24 +372,24 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
             continue
         else:
             well_paths.append(well_path)
-        print("well_path", well_path)
+        print("well_path", well_path, f"({well_index}/{well_count})")
         # create OMERO object
         well = omero.model.WellI()
         well.plate = omero.model.PlateI(plate.getId(), False)
         well.column = rint(column_index)
         well.row = rint(row_index)
 
-        well_attrs = load_attrs(f"{uri}{well_path}/", transport_params)
+        well_attrs = load_attrs(store, well_path)
         well_samples_attrs = well_attrs["well"]["images"]
 
 
         for sample_attrs in well_samples_attrs:
-            image_uri = f"{uri}{well_path}/{sample_attrs['path']}/"
+            image_path = f"{well_path}/{sample_attrs['path']}/"
 
-            img_attrs = load_attrs(image_uri, transport_params)
+            img_attrs = load_attrs(store, image_path)
             image_name = img_attrs.get('name', f"{well_path}/{sample_attrs['path']}")
 
-            image, rnd_def = create_image(conn, img_attrs, image_uri, image_name, families, models, transport_params, endpoint, uri_parameters)
+            image, rnd_def = create_image(conn, store, img_attrs, image_name, families, models, args, image_path)
 
             images_to_save.append(image)
             rnd_defs.append(rnd_def)
@@ -454,9 +397,9 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
             ws = omero.model.WellSampleI()
             if 'acquisition' in sample_attrs:
                 acquisition_id = sample_attrs['acquisition']
-                pa = plate_acquisitions.get(acquisition_id)
+                pa_id = plate_acquisitions.get(acquisition_id)
                 if pa is not None:
-                    ws.plateAcquisition = omero.model.PlateAcquisitionI(pa.getId(), False)
+                    ws.plateAcquisition = omero.model.PlateAcquisitionI(pa_id, False)
             ws.image = omero.model.ImageI(image.id.val, False)
             ws.well = well
             well.addWellSample(ws)
@@ -470,7 +413,7 @@ def register_plate(conn, uri, name=None, transport_params=None, endpoint=None, u
     return plate
 
 
-def set_external_info(uri, image, endpoint=None, uri_parameters=None):
+def set_external_info(image, args, image_path=None):
     '''
     Create the external info and link it to the image
     '''
@@ -478,15 +421,32 @@ def set_external_info(uri, image, endpoint=None, uri_parameters=None):
     # non-nullable properties
     setattr(extinfo, "entityId", rlong(3))
     setattr(extinfo, "entityType", rstring("com.glencoesoftware.ngff:multiscales"))
+
+    uri = args.uri
+    endpoint = args.endpoint
+    nosignrequest = args.nosignrequest
+
+    if image_path is not None:
+        uri = uri.rstrip("/") + "/" + image_path
+    parsed_uri = urlsplit(uri)
+    scheme = "{0.scheme}".format(parsed_uri)
+
+    if "http" in scheme:
+        endpoint = "https://" + "{0.netloc}".format(parsed_uri)
+        nosignrequest = True
+        path = "{0.path}".format(parsed_uri)
+        if path.startswith("/"):
+            path = path[1:]
+        uri = "s3://" + path
+    
     if not uri.startswith("/"):
         uri = format_s3_uri(uri, endpoint)
-    if uri_parameters:
+    if nosignrequest:
         if not uri.endswith("/"):
             uri = uri + "/"
-        uri = uri + uri_parameters
-    if uri.endswith("/"): # check with Will
-        uri = uri[:-1]
+        uri = uri + "?anonymous=true"
     setattr(extinfo, "lsid", rstring(uri))
+    print("lsid:", uri)
     image.details.externalInfo = extinfo
 
 def validate_uri(uri):
@@ -569,33 +529,47 @@ def main():
         endpoint = args.endpoint
         nosignrequest = args.nosignrequest
         validate_endpoint(endpoint)
+        store = None
         if uri.startswith("/"):
-            transport_params = None
+            store = zarr.storage.LocalStore(uri, read_only=True)
         else:
-            parsed_uri = urlsplit(uri)
-            scheme = "{0.scheme}".format(parsed_uri)
-            if "http" in scheme:
-                endpoint = "https://" + "{0.netloc}".format(parsed_uri)
-                nosignrequest = True
-                path = "{0.path}".format(parsed_uri)
-                if path.startswith("/"):
-                    path = path[1:]
-                uri = "s3://" + path
+            storage_options={}
+            if nosignrequest:
+                storage_options['anon'] = True
 
-            uri = validate_uri(uri)
-            transport_params = create_client(endpoint, nosignrequest)
-        params = get_uri_parameters(transport_params, nosignrequest)
-        type_to_register, uri = determine_object_to_register(uri, transport_params)
-        print("type_to_register, uri", type_to_register, uri)
+            if endpoint:
+                storage_options['client_kwargs'] = {'endpoint_url': endpoint}
 
-        if type_to_register == OBJECT_PLATE:
-            obj = register_plate(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
-            
+            store = zarr.storage.FsspecStore.from_url(uri,
+                read_only=True,
+                storage_options=storage_options
+            )
+
+        zattrs = load_attrs(store)
+        objs = []
+        if "plate" in zattrs:
+            print("Registering: Plate")
+            objs = [register_plate(conn, store, args, zattrs)]
         else:
-            obj = register_image(conn, uri, args.name, transport_params, endpoint=endpoint, uri_parameters=params)
+            if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
+                print("Registering: bioformats2raw.layout")
+                series = 0
+                series_exists = True
+                while series_exists:
+                    try:
+                        print("Checking for series:", series)
+                        obj = register_image(conn, store, args, None, image_path=str(series))
+                        objs.append(obj)
+                    except FileNotFoundError:
+                        series_exists = False
+                    series += 1
+            else:
+                print("Registering: Image")
+                objs = [register_image(conn, store, args, zattrs)]
 
         if args.target or args.target_by_name:
-            link_to_target(args, conn, obj)
+            for obj in objs:
+                link_to_target(args, conn, obj)
 
 if __name__ == "__main__":
     main()
