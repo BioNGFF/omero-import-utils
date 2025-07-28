@@ -181,6 +181,7 @@ def set_rendering_settings(omero_info, pixels_type, pixels_id, families, models)
     if rdefs is None:
         rdefs = dict()
     rnd_def = omero.model.RenderingDefI()
+    rnd_def.version = rint(0)
     rnd_def.defaultZ = rint(rdefs.get('defaultZ', 0))
     rnd_def.defaultT = rint(rdefs.get('defaultT', 0))
     value = rdefs.get('model', 'rgb')
