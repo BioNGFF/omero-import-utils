@@ -49,6 +49,7 @@ PIXELS_TYPE = {'int8': PixelsTypeint8,
                'uint8': PixelsTypeuint8,
                'uint16': PixelsTypeuint16,
                'int32': PixelsTypeint32,
+               'uint32': PixelsTypeuint32,
                'float_': PixelsTypefloat,
                'float8': PixelsTypefloat,
                'float16': PixelsTypefloat,
@@ -131,13 +132,13 @@ def create_image(conn, store, image_attrs, object_name, families, models, args, 
     iid = iid.getValue()
 
     rnd_def = None
+    image = conn.getObject("Image", iid)
     omero_attrs = image_attrs.get('omero', None)
     if omero_attrs is not None:
         set_channel_names(conn, iid, omero_attrs)
         # Check rendering settings
         rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
 
-    image = conn.getObject("Image", iid)
     img_obj = image._obj
     set_external_info(img_obj, args, image_path)
 
