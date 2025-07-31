@@ -238,10 +238,15 @@ def set_rendering_settings(omero_info, pixels_type, pixels_id, families, models)
         cb.alpha = rint(255)
         cb.noiseReduction = rbool(False)
 
-        window = entry.get("window", None)
-        if window:
-            cb.inputStart = rdouble(window.get("start", pixels_min))
-            cb.inputEnd = rdouble(window.get("end", pixels_max))
+        window = entry.get("window", {})
+        try:
+            cb.inputStart = rdouble(float(window.get("start", pixels_min)))
+        except TypeError:
+            cb.inputStart = rdouble(pixels_min)
+        try:
+            cb.inputEnd = rdouble(float(window.get("end", pixels_max)))
+        except TypeError:
+            cb.inputEnd = rdouble(pixels_max)
         inverted = entry.get("inverted", False)
         if inverted: # add codomain
             ric = omero.model.ReverseIntensityContextI()
