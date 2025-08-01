@@ -113,7 +113,7 @@ def masks_from_labels_nd(
 
     # For each label value, we create an ROI that
     # contains 2D masks for each time point, channel, and z-slice.
-    for i in range(1, labels_nd.max() + 1):
+    for i in range(1, int(labels_nd.max()) + 1):
         print("Mask value", i)
         if not np.any(labels_nd == i):
             continue
