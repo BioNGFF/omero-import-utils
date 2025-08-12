@@ -21,8 +21,14 @@
 
 from urllib.parse import urlsplit
 import zarr
+from zarr.core.buffer import default_buffer_prototype
+from zarr.core.sync import sync
 
 import argparse
+import locale
+import platform
+import sys
+import tempfile
 
 from numpy import iinfo, finfo
 
@@ -41,6 +47,11 @@ from omero.model.enums import PixelsTypecomplex, PixelsTypedouble
 
 from omero.model import ExternalInfoI
 from omero.rtypes import rbool, rdouble, rint, rlong, rstring, rtime
+from omero.model import ChecksumAlgorithmI
+from omero.model import NamedValue
+from omero.model.enums import ChecksumAlgorithmSHA1160
+from omero_version import omero_version
+from omero.callbacks import CmdCallbackI
 
 AWS_DEFAULT_ENDPOINT = "s3.us-east-1.amazonaws.com"
 
@@ -57,6 +68,122 @@ PIXELS_TYPE = {'int8': PixelsTypeint8,
                'float64': PixelsTypedouble,
                'complex_': PixelsTypecomplex,
                'complex64': PixelsTypecomplex}
+
+
+def get_omexml_bytes(store):
+    # get() is async. Need to sync to get the bytes
+    rsp = store.get("OME/METADATA.ome.xml", prototype=default_buffer_prototype())
+    result = sync(rsp)
+    if result is None:
+        return None
+    return result.to_bytes()
+
+
+def create_fileset():
+    """Create a new Fileset with single OME XML file."""
+    fileset = omero.model.FilesetI()
+    entry = omero.model.FilesetEntryI()
+    # NB: If the clientPath includes .zarr, Bio-Formats tries to import zarr group
+    entry.setClientPath(rstring("OME/METADATA.ome.xml"))
+    fileset.addFilesetEntry(entry)
+
+    # Fill version info
+    system, node, release, version, machine, processor = platform.uname()
+
+    client_version_info = [
+        NamedValue('omero.version', omero_version),
+        NamedValue('os.name', system),
+        NamedValue('os.version', release),
+        NamedValue('os.architecture', machine)
+    ]
+    try:
+        client_version_info.append(
+            NamedValue('locale', locale.getlocale()[0]))
+    except:
+        pass
+
+    upload = omero.model.UploadJobI()
+    upload.setVersionInfo(client_version_info)
+    fileset.linkJob(upload)
+    return fileset
+
+
+def create_settings():
+    """Create ImportSettings and set some values."""
+    settings = omero.grid.ImportSettings()
+    settings.doThumbnails = rbool(True)
+    settings.noStatsInfo = rbool(False)
+    settings.userSpecifiedTarget = None
+    settings.userSpecifiedName = None
+    settings.userSpecifiedDescription = None
+    settings.userSpecifiedAnnotationList = None
+    settings.userSpecifiedPixels = None
+    settings.checksumAlgorithm = ChecksumAlgorithmI()
+    s = rstring(ChecksumAlgorithmSHA1160)
+    settings.checksumAlgorithm.value = s
+    return settings
+
+
+def upload_file(proc, omexml_bytes, client):
+    """Upload files to OMERO from local filesystem."""
+    ret_val = []
+    i = 0
+    rfs = proc.getUploader(i)
+    try:
+        offset = 0
+        # rfs.write([], offset, 0)  # Touch
+        # Write the OME XML file
+        rfs.write(omexml_bytes, offset, len(omexml_bytes))
+
+        # create temp file for sha1
+        with tempfile.NamedTemporaryFile(delete_on_close=False) as fp:
+            fp.write(omexml_bytes)
+            fp.close()
+            ret_val.append(client.sha1(fp.name))
+    finally:
+        rfs.close()
+    return ret_val
+
+
+def assert_import(client, proc, omexml_bytes, wait):
+    """Wait and check that we imported an image."""
+    hashes = upload_file(proc, omexml_bytes, client)
+    # print ('Hashes:\n  %s' % '\n  '.join(hashes))
+    handle = proc.verifyUpload(hashes)
+    cb = CmdCallbackI(client, handle)
+
+    # https://github.com/openmicroscopy/openmicroscopy/blob/v5.4.9/components/blitz/src/ome/formats/importer/ImportLibrary.java#L631
+    if wait == 0:
+        cb.close(False)
+        return None
+    if wait < 0:
+        while not cb.block(2000):
+            sys.stdout.write('.')
+            sys.stdout.flush()
+        sys.stdout.write('\n')
+    else:
+        cb.loop(wait, 1000)
+    rsp = cb.getResponse()
+    if isinstance(rsp, omero.cmd.ERR):
+        raise Exception(rsp)
+    assert len(rsp.pixels) > 0
+    return rsp
+
+
+def full_import(client, omexml_bytes, wait=-1):
+    """Re-usable method for a basic import."""
+    mrepo = client.getManagedRepository()
+
+    fileset = create_fileset()
+    settings = create_settings()
+
+    proc = mrepo.importFileset(fileset, settings)
+    try:
+        # do the upload and trigger the import
+        return assert_import(client, proc, omexml_bytes, wait)
+    finally:
+        proc.close()
+
 
 def format_s3_uri(uri, endpoint):
     '''
@@ -565,16 +692,36 @@ def main():
         else:
             if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
                 print("Registering: bioformats2raw.layout")
-                series = 0
-                series_exists = True
-                while series_exists:
-                    try:
-                        print("Checking for series:", series)
-                        obj = register_image(conn, store, args, None, image_path=str(series))
+                zarr_name = args.uri.rstrip("/").split("/")[-1]
+                if args.name:
+                    zarr_name = args.name
+                # try to load OME/METADATA.ome.xml
+                omexml_bytes = get_omexml_bytes(store)
+                if omexml_bytes is not None:
+                    print("Importing OME/METADATA.ome.xml")
+                    rsp = full_import(conn.c, omexml_bytes)
+                    for series, p in enumerate(rsp.pixels):
+                        # set external info. NB: order of pixels MUST match the series 0, 1, 2...
+                        obj = conn.getObject("Image", p.image.id.val)
+                        set_external_info(obj._obj, args, image_path=str(series))
+                        # default name is METADATA.ome.xml [series], based on clientPath?
+                        new_name = obj.name.replace("METADATA.ome.xml", zarr_name)
+                        print("Imported Image:", obj.id, new_name)
+                        obj.setName(new_name)
+                        obj.save()   # save Name and ExternalInfo
                         objs.append(obj)
-                    except FileNotFoundError:
-                        series_exists = False
-                    series += 1
+                else:
+                    print("OME/METADATA.ome.xml Not Found")
+                    series = 0
+                    series_exists = True
+                    while series_exists:
+                        try:
+                            print("Checking for series:", series)
+                            obj = register_image(conn, store, args, None, image_path=str(series))
+                            objs.append(obj)
+                        except FileNotFoundError:
+                            series_exists = False
+                        series += 1
             else:
                 print("Registering: Image")
                 objs = [register_image(conn, store, args, zattrs)]
