@@ -22,6 +22,15 @@
 from urllib.parse import urlsplit
 import zarr
 
+FsspecStore = None
+FSStore = None
+try:
+    # zarr >= 3.0.0
+    from zarr.storage import FsspecStore
+except ImportError:
+    # zarr 2
+    from zarr.storage import FSStore
+
 import argparse
 
 from numpy import iinfo, finfo
@@ -552,10 +561,13 @@ def main():
             if endpoint:
                 storage_options['client_kwargs'] = {'endpoint_url': endpoint}
 
-            store = zarr.storage.FsspecStore.from_url(uri,
-                read_only=True,
-                storage_options=storage_options
-            )
+            if FsspecStore is not None:
+                store = FsspecStore.from_url(uri,
+                    read_only=True,
+                    storage_options=storage_options
+                )
+            else:
+                store = FSStore(uri, mode='r', **storage_options)
 
         zattrs = load_attrs(store)
         objs = []
@@ -572,7 +584,8 @@ def main():
                         print("Checking for series:", series)
                         obj = register_image(conn, store, args, None, image_path=str(series))
                         objs.append(obj)
-                    except FileNotFoundError:
+                    except:
+                        # FileNotFoundError (zarr v3) or zarr.errors.PathNotFoundError (zarr v2)
                         series_exists = False
                     series += 1
             else:
