@@ -36,7 +36,6 @@ from numpy import iinfo, finfo
 
 from omero.cli import cli_login
 from omero.gateway import BlitzGateway
-from omero.gateway import OMERO_NUMPY_TYPES
 
 import omero
 
@@ -260,11 +259,8 @@ def create_image(conn, store, image_attrs, object_name, families, models, args, 
 
     rnd_def = None
     image = conn.getObject("Image", iid)
-    omero_attrs = image_attrs.get('omero', None)
-    if omero_attrs is not None:
-        set_channel_names(conn, iid, omero_attrs)
-        # Check rendering settings
-        rnd_def = set_rendering_settings(omero_attrs, pixels_type, image.getPixelsId(), families, models)
+    # Set rendering settings and channel names if omero_attrs is provided
+    rnd_def = set_rendering_settings(conn, image, image_attrs, pixels_type, families, models)
 
     img_obj = image._obj
     set_external_info(img_obj, args, image_path)
@@ -301,10 +297,22 @@ def set_channel_names(conn, iid, omero_attrs):
     conn.setChannelNames("Image", [iid], nameDict)
 
 
-def set_rendering_settings(omero_info, pixels_type, pixels_id, families, models):
+def set_rendering_settings(conn, image, image_attrs, pixels_type, families=None, models=None):
     '''
     Extract the rendering settings and the channels information
     '''
+    omero_info = image_attrs.get('omero', None)
+    if omero_info is None:
+        return None
+    set_channel_names(conn, image.id, omero_info)
+
+    if families is None:
+        families = load_families(conn.getQueryService())
+    if models is None:
+        models = load_models(conn.getQueryService())
+
+    pixels_id = image.getPrimaryPixels().getId()
+    
     if omero_info is None:
         return
     rdefs = omero_info.get('rdefs', None)
@@ -625,9 +633,15 @@ def link_to_target(args, conn, obj):
 
     if args.target:
         if is_plate:
-            target = conn.getObject("Screen", attributes={'id': int(args.target)})
+            screen_id = args.target
+            if screen_id.startswith("Screen:"):
+                screen_id = screen_id.split(":")[1]
+            target = conn.getObject("Screen", attributes={'id': int(screen_id)})
         else:
-            target = conn.getObject("Dataset", attributes={'id': int(args.target)})
+            dataset_id = args.target
+            if dataset_id.startswith("Dataset:"):
+                dataset_id = dataset_id.split(":")[1]
+            target = conn.getObject("Dataset", attributes={'id': int(dataset_id)})
     else:
         if is_plate:
             target = conn.getObject("Screen", attributes={'name': args.target_by_name})
@@ -702,14 +716,21 @@ def main():
                     rsp = full_import(conn.c, omexml_bytes)
                     for series, p in enumerate(rsp.pixels):
                         # set external info. NB: order of pixels MUST match the series 0, 1, 2...
-                        obj = conn.getObject("Image", p.image.id.val)
-                        set_external_info(obj._obj, args, image_path=str(series))
+                        image = conn.getObject("Image", p.image.id.val)
+                        image_path = str(series)
+                        image_attrs = load_attrs(store, image_path)
+                        # pixels_type is only used if we have *incomplete* `omero` metadata
+                        sizes, pixels_type = parse_image_metadata(store, image_attrs, image_path)
+                        rnd_def = set_rendering_settings(conn, image, image_attrs, pixels_type)
+                        if rnd_def is not None:
+                            conn.getUpdateService().saveAndReturnObject(rnd_def)
+                        set_external_info(image._obj, args, image_path=image_path)
                         # default name is METADATA.ome.xml [series], based on clientPath?
-                        new_name = obj.name.replace("METADATA.ome.xml", zarr_name)
-                        print("Imported Image:", obj.id, new_name)
-                        obj.setName(new_name)
-                        obj.save()   # save Name and ExternalInfo
-                        objs.append(obj)
+                        new_name = image.name.replace("METADATA.ome.xml", zarr_name)
+                        print("Imported Image:", image.id, new_name)
+                        image.setName(new_name)
+                        image.save()   # save Name and ExternalInfo
+                        objs.append(image)
                 else:
                     print("OME/METADATA.ome.xml Not Found")
                     series = 0
