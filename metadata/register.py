@@ -673,6 +673,10 @@ def main():
     parser.add_argument("--nosignrequest", required=False, action='store_true', help="Indicate to sign anonymously")
     parser.add_argument("--target", required=False, type=str, help="The id of the target (dataset/screen)")
     parser.add_argument("--target-by-name", required=False, type=str, help="The name of the target (dataset/screen)")
+    parser.add_argument('--wait', type=int, default=-1, help=(
+        'Wait for this number of seconds for each import to complete. '
+        '0: return immediately, -1: wait indefinitely (default). '
+        'Only applies when importing OME/METADATA.ome.xml.'))
 
     args = parser.parse_args()
 
@@ -713,7 +717,7 @@ def main():
                 omexml_bytes = get_omexml_bytes(store)
                 if omexml_bytes is not None:
                     print("Importing OME/METADATA.ome.xml")
-                    rsp = full_import(conn.c, omexml_bytes)
+                    rsp = full_import(conn.c, omexml_bytes, args.wait)
                     for series, p in enumerate(rsp.pixels):
                         # set external info. NB: order of pixels MUST match the series 0, 1, 2...
                         image = conn.getObject("Image", p.image.id.val)
