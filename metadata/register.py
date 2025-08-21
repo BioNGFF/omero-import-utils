@@ -110,7 +110,8 @@ def create_fileset():
 def create_settings():
     """Create ImportSettings and set some values."""
     settings = omero.grid.ImportSettings()
-    settings.doThumbnails = rbool(True)
+    # can't create thumbnails on import since ExternalInfo is not set yet
+    settings.doThumbnails = rbool(False)
     settings.noStatsInfo = rbool(False)
     settings.userSpecifiedTarget = None
     settings.userSpecifiedName = None
