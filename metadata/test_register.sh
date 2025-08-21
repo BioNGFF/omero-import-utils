@@ -40,7 +40,7 @@ python register.py --target "$dataset" https://storage.googleapis.com/jax-public
 python register.py --target "$dataset" https://uk1s3.embassy.ebi.ac.uk/idr/zarr/v0.4/idr0048A/9846151.zarr/
 
 # Test rendering settings (image also has labels)
-python register.py --target "$dataset" python register.py --target 21520 python register.py --target 21520 https://uk1s3.embassy.ebi.ac.uk/bia-idr-integration/S-BIAD1961/experimentA/RP-TMA/RP-TMA-3_ROI01_multichannel.zarr/experimentA_backup/RP-TMA/RP-TMA-3_ROI01_multichannel.zarr/
+python register.py --target "$dataset" https://uk1s3.embassy.ebi.ac.uk/bia-idr-integration/S-BIAD1961/experimentA/RP-TMA/RP-TMA-3_ROI01_multichannel.zarr/experimentA_backup/RP-TMA/RP-TMA-3_ROI01_multichannel.zarr/
 
 # plate from idr0011 (48 Wells, 1 field):
 # python register.py https://uk1s3.embassy.ebi.ac.uk/bia-integrator-data/S-BIAD866/7f95aba3-cfbf-4ae8-a106-edaa36f5b07f/7f95aba3-cfbf-4ae8-a106-edaa36f5b07f.zarr/
