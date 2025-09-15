@@ -1,14 +1,26 @@
 # requires Zarr v2 and ome-types
 # pip install ome-types zarr==2.18.7
 
+import zarr
 from zarr.storage import FSStore
 import json
 import dask.array as da
+import os
 import sys
 from ome_types import to_xml
 from ome_types.model import OME, Image, Pixels, Plate, Well, WellSample, ImageRef
 from ome_types.model.simple_types import ImageID, PixelsID, PixelType, PlateID, WellID, WellSampleID
 
+"""
+Usage: python zarr_ome_xml.py <zarr_uri>
+
+If the zarr_uri points to a plate, we create a Plate with Wells and WellSamples.
+
+If the zarr_uri points to a single image (multiscales in /.zattrs) we create
+an OME XML file with a single Image.
+Otherwise, we look for zarr_uri/0, zarr_uri/1 etc and create an OME XML file
+with all the images found, at zarr_uri/OME/METADATA.ome.xml
+"""
 
 pixels_id_counter = 0
 image_id_counter = 0
@@ -70,7 +82,7 @@ def handle_plate(store, zarr_uri):
             well_sample_id_counter += 1
             well_sample_path = f"{well_path}/{sample_attrs['path']}"
             image_json =  json.loads(store.get(f"{well_sample_path}/.zattrs"))
-            array_path =  f"{well_sample_path}/{image_json["multiscales"][0]["datasets"][0]["path"]}"
+            array_path =  f"{well_sample_path}/{image_json['multiscales'][0]['datasets'][0]['path']}"
             array_data = da.from_zarr(store, array_path)
             sizes = {}
             shape = array_data.shape
@@ -89,24 +101,55 @@ def handle_plate(store, zarr_uri):
     write_xml(ome, object_name) 
 
 
-def handle_image(store, zarr_uri):
-    zattrs = json.loads(store.get(".zattrs"))
-    array_path = zattrs["multiscales"][0]["datasets"][0]["path"]
-    array_data = da.from_zarr(store, array_path)
+def handle_images(zarr_uri, zattrs):
 
-    sizes = {}
-    shape = array_data.shape
-    axes = zattrs["multiscales"][0]["axes"]
-    for dim, size in zip(axes, shape):
-        sizes[dim["name"]] = size
-    pixels_type = array_data.dtype.name
-
-    object_name = zarr_uri.rstrip("/").split("/")[-1].split(".")[0]
-
-    img = create_image(object_name, pixels_type, sizes)
     ome = OME()
-    ome.images.append(img)
-    write_xml(ome, object_name)    
+
+    if zattrs is not None and "multiscales" in zattrs:
+        image_uris = [zarr_uri]
+    else:
+        # look for /0, /1 etc
+        image_uris = []
+        index = 0
+        while True:
+            image_uri = os.path.join(zarr_uri, str(index))
+            print("Checking for", image_uri)
+            if not os.path.exists(image_uri):
+                break
+            image_uris.append(image_uri)
+            index += 1
+    if len(image_uris) == 0:
+        print("No images found in", zarr_uri)
+
+    print("image_uris", image_uris)
+    for image_uri in image_uris:
+        print("Handling", image_uri)
+        store = FSStore(image_uri)
+        zattrs = json.loads(store.get(".zattrs"))
+        array_path = zattrs["multiscales"][0]["datasets"][0]["path"]
+        array_data = da.from_zarr(store, array_path)
+        object_name = image_uri.rstrip("/").split("/")[-1].split(".")[0]
+        if zattrs["multiscales"][0].get("name", "/") != "/":
+            object_name = zattrs["multiscales"][0]["name"]
+
+        sizes = {}
+        shape = array_data.shape
+        axes = zattrs["multiscales"][0]["axes"]
+        for dim, size in zip(axes, shape):
+            sizes[dim["name"]] = size
+        pixels_type = array_data.dtype.name
+
+        img = create_image(object_name, pixels_type, sizes)
+        ome.images.append(img)
+
+    out_path = os.path.join(zarr_uri, "OME", "METADATA")
+    os.makedirs(os.path.join(zarr_uri, "OME"))
+    write_xml(ome, out_path)
+
+    # If the zarr_url directory isn't a zarr group, we create it
+    if not os.path.exists(os.path.join(zarr_uri, ".zgroup")):
+        zgroup = zarr.open_group(zarr_uri, mode='a')
+        zgroup.attrs["bioformats2raw.layout"] = 3
 
 
 if len(sys.argv) < 2:
@@ -114,15 +157,24 @@ if len(sys.argv) < 2:
     print("Usage: python zarr_ome_xml.py <zarr_uri>")
     sys.exit(1)
 
-zarr_uri = sys.argv[1]
-zattrs = json.load(open(f"{zarr_uri}/.zattrs"))
+print("ARGS", sys.argv)
 
-if "plate" in zattrs:
-    store = FSStore(zarr_uri)
-    handle_plate(store, zarr_uri)
+zarr_uri = sys.argv[1]
+
+zattrs = None
+plate_uri = None
+try:
+    zattrs = json.load(open(f"{zarr_uri}/.zattrs"))
+    if "plate" in zattrs:
+        plate_uri = zarr_uri
+except Exception as e:
+    print("Not a plate:", e)
+    pass
+
+if plate_uri is not None:
+    print("Handling plate", plate_uri)
+    store = FSStore(plate_uri)
+    handle_plate(store, plate_uri)
 else:
-    if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
-        store = FSStore(f"{zarr_uri}/0")
-    else:
-        store = FSStore(zarr_uri)
-    handle_image(store, zarr_uri)
+    # If zattrs not found, we look in /0 etc for images
+    handle_images(zarr_uri, zattrs)
