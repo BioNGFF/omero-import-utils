@@ -47,6 +47,7 @@ from omero.model.enums import PixelsTypecomplex, PixelsTypedouble
 from omero.model import ExternalInfoI
 from omero.rtypes import rbool, rdouble, rint, rlong, rstring, rtime
 from omero.model import ChecksumAlgorithmI
+from omero.model import LengthI
 from omero.model import NamedValue
 from omero.model.enums import ChecksumAlgorithmSHA1160
 from omero_version import omero_version
@@ -236,8 +237,17 @@ def parse_image_metadata(store, img_attrs, image_path=None):
             else:
                 sizes[axis["name"]] = size
 
+    pixel_size = {}
+    transforms = multiscale_attrs["datasets"][0]["coordinateTransformations"]
+    for transform in transforms:
+        if transform["type"] == "scale":
+            scale = transform["scale"]
+            pixel_size = {axis["name"]: (pixel_size, axis.get("unit", "")) for axis, pixel_size
+                          in zip(axes, scale) if axis["name"] in "xyz"}
+            break
+
     pixels_type = array_data.dtype.name
-    return sizes, pixels_type
+    return sizes, pixel_size, pixels_type
 
 
 def create_image(conn, store, image_attrs, object_name, families, models, args, image_path=None):
@@ -246,7 +256,7 @@ def create_image(conn, store, image_attrs, object_name, families, models, args, 
     '''
     query_service = conn.getQueryService()
     pixels_service = conn.getPixelsService()
-    sizes, pixels_type = parse_image_metadata(store, image_attrs, image_path)
+    sizes, pixel_size, pixels_type = parse_image_metadata(store, image_attrs, image_path)
     size_t = sizes.get("t", 1)
     size_z = sizes.get("z", 1)
     size_x = sizes.get("x", 1)
@@ -262,6 +272,8 @@ def create_image(conn, store, image_attrs, object_name, families, models, args, 
     image = conn.getObject("Image", iid)
     # Set rendering settings and channel names if omero_attrs is provided
     rnd_def = set_rendering_settings(conn, image, image_attrs, pixels_type, families, models)
+
+    set_pixel_size(image, pixel_size)
 
     img_obj = image._obj
     set_external_info(img_obj, args, image_path)
@@ -389,6 +401,16 @@ def set_rendering_settings(conn, image, image_attrs, pixels_type, families=None,
             ric.reverse = rbool(inverted)
             cb.addCodomainMapContext(ric)
     return rnd_def
+
+
+def set_pixel_size(image, pixel_size):
+    pixels = image.getPrimaryPixels()._obj
+    if "x" in pixel_size:
+        pixels.setPhysicalSizeX(LengthI(pixel_size["x"][0], pixel_size["x"][1].upper()))
+    if "y" in pixel_size:
+        pixels.setPhysicalSizeY(LengthI(pixel_size["y"][0], pixel_size["y"][1].upper()))
+    if "z" in pixel_size:
+        pixels.setPhysicalSizeZ(LengthI(pixel_size["z"][0], pixel_size["z"][1].upper()))
 
 
 def load_families(query_service):
@@ -725,7 +747,7 @@ def main():
                         image_path = str(series)
                         image_attrs = load_attrs(store, image_path)
                         # pixels_type is only used if we have *incomplete* `omero` metadata
-                        sizes, pixels_type = parse_image_metadata(store, image_attrs, image_path)
+                        sizes, pixel_size, pixels_type = parse_image_metadata(store, image_attrs, image_path)
                         rnd_def = set_rendering_settings(conn, image, image_attrs, pixels_type)
                         if rnd_def is not None:
                             conn.getUpdateService().saveAndReturnObject(rnd_def)
